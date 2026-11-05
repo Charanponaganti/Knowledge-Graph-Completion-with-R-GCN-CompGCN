@@ -377,15 +377,15 @@ PySpark 3.5, PyTorch from the Kaggle GPU image, PyTorch Geometric, \texttt{ogb}.
 Optional \texttt{torch-scatter}/\texttt{torch-sparse} are installed only when
 binary wheels exist; compiling them on CUDA~13 kills the Kaggle kernel.
 
-Figure~\ref{fig:curves} shows training loss and validation MRR. DistMult and
-CompGCN-corr stop early (patience); the remaining models run all 8 epochs.
+Figure~\ref{fig:curves} shows training loss and validation MRR. CompGCN-corr
+stops early (patience) at epoch 6; every other model runs all 8 epochs.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\columnwidth]{fig_train_curves.png}
 \caption{Training loss (left) and validation MRR under 500-candidate ranking
-(right). All models share the matched budget ($8\times 400$ steps); early
-stopping ends DistMult and CompGCN-corr before epoch 8.}
+(right). All models share the matched budget ($8\times 400$ steps); only
+CompGCN-corr is early-stopped (epoch 6) after its validation MRR collapses.}
 \label{fig:curves}
 \end{figure}
 
