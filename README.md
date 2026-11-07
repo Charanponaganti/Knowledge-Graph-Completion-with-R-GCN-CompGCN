@@ -18,7 +18,7 @@ Scores in the report come only from `outputs/results.json` of an executed run. R
 
 | Preset | GPU | VRAM | Batch | Dim | Fanout | Spark driver |
 |---|---|---|---|---|---|---|
-| `kaggle_t4` | NVIDIA T4 | 16 GB | 1024 | 128 | [10, 10] | 12g |
+| `kaggle_t4` | NVIDIA T4 | 16 GB | 512 | 128 | [10, 10] | 12g |
 | `rtx4050` | GeForce RTX 4050 | ~6 GB | 256 | 64 | [8, 8] | 8g |
 | `cpu` | — | — | 128 | 32 | [5, 5] | 8g |
 
@@ -47,7 +47,8 @@ Results are saved after every model (`outputs/results_partial.json`, `outputs/<m
 ## Files
 
 ```
-notebooks/kg_completion_rgcn_compgcn.ipynb   # upload this to Kaggle (self-contained)
+notebooks/final.ipynb                       # executed long-run Kaggle copy
+notebooks/kg_completion_rgcn_compgcn.ipynb   # general-purpose self-contained notebook
 src/spark_etl.py  models.py  train.py  evaluate.py   # mirrors for reading / viva; notebook does not import them
 requirements.txt
 report/latex/                   # ACL 2023 LaTeX report (main.tex, custom.bib, compile.bat, main.pdf)
@@ -98,8 +99,9 @@ using the supplied ACL Word format. See `report/REVIEW_NOTES.md` for the metric
 and methodology corrections. Its tables are generated from the saved root
 `results.json`; the experiments were not rerun for this editorial revision.
 The current report covers the saved **long** T4 run (12 × 600 steps; 15,000
-local test triples). Set `TIME_BUDGET = 'long'` explicitly to reproduce that
-configuration; the notebook currently defaults to `fast`.
+local test triples). The executed, long-run Kaggle notebook is
+`notebooks/final.ipynb`; `notebooks/kg_completion_rgcn_compgcn.ipynb` remains
+the general-purpose notebook with its `fast` default.
 
 To regenerate the editable report and alternative LaTeX source:
 
