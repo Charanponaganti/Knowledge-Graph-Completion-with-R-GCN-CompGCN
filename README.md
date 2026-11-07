@@ -92,7 +92,27 @@ Windows + Spark sometimes wants `JAVA_HOME` and can complain about Hadoop native
 
 ## Build the report
 
-Copy the Kaggle PNGs into `report/figures/`, update the numbers in `report/latex/main.tex` from `results.json`, then run `report/latex/compile.bat`. Do not type made-up MRR/Hits numbers.
+The revised report is available in `report/Knowledge_Graph_Completion_Report.docx`
+and `report/Knowledge_Graph_Completion_Report.pdf` (12 pages including references),
+using the supplied ACL Word format. See `report/REVIEW_NOTES.md` for the metric
+and methodology corrections. Its tables are generated from the saved root
+`results.json`; the experiments were not rerun for this editorial revision.
+
+To regenerate the editable report and alternative LaTeX source:
+
+```text
+python report/build_report.py --template "C:\Users\Charan\Downloads\acl2023.docx"
+```
+
+The builder requires `python-docx`. Export the DOCX through Word to update the
+PDF and check pagination after content changes. The existing `report/latex/main.pdf`
+is a copy of the final Word export; the alternative LaTeX build has not been
+pagination-verified locally.
+
+For a new experiment, replace the saved result exports and copy its PNGs into
+`report/figures/`, then regenerate the report and review the narrative against
+the new run. Do not type made-up MRR/Hits numbers or assume old conclusions
+still apply. `report/latex/compile.bat` builds the alternative LaTeX version.
 
 ## OOM / troubleshooting
 
