@@ -397,7 +397,7 @@ bullets(s, Inches(6.9), Inches(3.2), Inches(5.9), Inches(3.6), [
 b = R['budget']
 s = new_slide('Training recipe', 'mc',
               "~1:15\nEvery step trains both directions: predict the tail from the head and the head "
-              "from the tail. All seven models get the same budget, 8 epochs of 400 steps with 16 "
+              "from the tail. All seven models get the same budget, 12 epochs of 600 steps with 16 "
               "negatives, so the comparison is fair. Negatives are type-aware: a drug is replaced by "
               "another drug. Self-adversarial weighting from RotatE focuses the loss on hard negatives.")
 bullets(s, Inches(0.55), Inches(1.45), Inches(6.6), Inches(5.3), [
@@ -426,7 +426,7 @@ s = new_slide('Two evaluation protocols', 'mc',
               "order, and Spark reorders rows, so we evaluate OGB on the original order. Hand over to Lalit.")
 card(s, Inches(0.55), Inches(1.5), Inches(5.95), Inches(3.6), 'Filtered candidates (ours)', [
     'True entity vs 500 random entities', 'Other true answers masked via Spark keys',
-    'Head + tail, 8,000 test triples', 'Fast; used for validation each epoch'], color=TEAL, size=17)
+    'Head + tail, 15,000 test triples', 'Fast; used for validation each epoch'], color=TEAL, size=17)
 card(s, Inches(6.85), Inches(1.5), Inches(5.95), Inches(3.6), 'Official OGB evaluator', [
     "OGB's type-constrained negatives", f"All {R['eval']['ogb_test_triples']:,} test triples, head + tail",
     'Comparable to published numbers', 'Main metric in the report'], color=ORANGE, size=17)
@@ -437,11 +437,14 @@ textbox(s, Inches(0.8), Inches(5.45), Inches(11.8), Inches(1.2), [
     size=16, color=INK, anchor=MSO_ANCHOR.MIDDLE)
 
 # 12 ─ OGB results ────────────────────────────────────────────────────────
+_best = MAIN['compgcn_mult']['ogb']
 s = new_slide('Main result: official OGB evaluator', 'ld',
               "~1:30\nThis is the headline table. CompGCN with multiplication is best on every metric: "
-              "MRR 0.513, Hits@10 0.736. CompGCN-sub is close behind, then R-GCN at 0.401. Shallow "
-              "TransE and ComplEx sit around 0.26 and DistMult is lowest at 0.149. CompGCN-corr failed "
-              "to learn. Message passing clearly helps under type-constrained negatives.",
+              f"MRR {_best['mrr_list']:.3f}, Hits@10 {_best['hits@10_list']:.3f}. "
+              f"CompGCN-sub is close behind at {MAIN['compgcn_sub']['ogb']['mrr_list']:.3f}, then "
+              f"R-GCN at {MAIN['rgcn']['ogb']['mrr_list']:.3f}. DistMult is "
+              f"{MAIN['distmult']['ogb']['mrr_list']:.3f}; TransE/ComplEx sit around 0.25–0.27. "
+              "CompGCN-corr failed to learn. Message passing clearly helps under type-constrained negatives.",
               kicker='162,870 test triples')
 rows = [['Model', 'MRR', 'H@1', 'H@3', 'H@10']]
 for k in ORDER:
@@ -471,12 +474,13 @@ textbox(s, Inches(7.2), Inches(5.9), Inches(5.5), Inches(0.85),
         size=15, bold=True, color=NAVY, anchor=MSO_ANCHOR.MIDDLE)
 
 # 13 ─ Candidate results ──────────────────────────────────────────────────
+_cm = MAIN['compgcn_mult']
 s = new_slide('Second protocol agrees', 'ld',
               "~1:00\nUnder the 500-candidate protocol the ranking is the same: CompGCN-mult on top with "
-              "MRR 0.526 and Hits@10 0.80. Absolute numbers are higher because random candidates are "
-              "easier than OGB's type-constrained ones. In an earlier run with an unequal budget DistMult "
-              "looked best here; with a matched budget that disappears.",
-              kicker='8,000 test triples · 500 candidates')
+              f"MRR {_cm['MRR']:.3f} and Hits@10 {_cm['Hits@10']:.3f}. Absolute numbers are higher "
+              "because random candidates are easier than OGB's type-constrained ones. In an earlier run "
+              "with an unequal budget DistMult looked best here; with a matched budget that disappears.",
+              kicker='15,000 test triples · 500 candidates')
 rows = [['Model', 'MRR', 'H@10', 'MR']]
 for k in ORDER:
     m = MAIN[k]
@@ -492,22 +496,22 @@ bullets(s, Inches(6.3), Inches(5.75), Inches(6.5), Inches(1.1), [
 # 14 ─ Curves ─────────────────────────────────────────────────────────────
 s = new_slide('Training dynamics', 'ld',
               "~1:00\nLeft: loss. CompGCN-mult reaches the lowest loss, then CompGCN-sub and R-GCN. "
-              "TransE plateaus highest. Right: validation MRR on 500 random candidates, which is why "
-              "every healthy model sits near 0.8. CompGCN-corr starts near 0.2, collapses to almost "
-              "zero, and early stopping ends it at epoch 6. All other models run the full 8 epochs.")
+              "TransE plateaus highest. Right: validation MRR on 500 random candidates. CompGCN-corr "
+              "starts near 0.2, collapses to almost zero, and early stopping ends it at epoch 6. "
+              "All other models run the full 12 epochs.")
 picture(s, FIG / 'fig_train_curves.png', Inches(0.55), Inches(1.35), Inches(12.2), Inches(4.4))
 bullets(s, Inches(0.55), Inches(5.85), Inches(12.2), Inches(1.0), [
     ('Lowest loss:', 'CompGCN-mult, then CompGCN-sub and R-GCN; TransE plateaus highest.'),
-    ('CompGCN-corr collapses', 'after epoch 1 even in float32; early-stopped at epoch 6 (all others run 8).'),
+    ('CompGCN-corr collapses', 'after epoch 1 even in float32; early-stopped at epoch 6 (all others run 12).'),
 ], size=16, gap=4)
 
 # 15 ─ Ablations ──────────────────────────────────────────────────────────
 ab = R['ablation']
+_ab_ep, _ab_st = ab[0]['epochs'], ab[0]['steps']
 s = new_slide('R-GCN ablations', 'ld',
-              "~1:00\nHalf-length runs of R-GCN: 4 epochs of 200 steps. Changes are small. Four bases "
-              "instead of eight is slightly best, one layer and eight negatives are about equal to the "
-              "base, and halving the dimension to 64 hurts most. So capacity matters more than depth "
-              "at this budget.", kicker='4 epochs × 200 steps')
+              f"~1:00\nHalf-length runs of R-GCN: {_ab_ep} epochs of {_ab_st} steps. One layer is "
+              "strongest; eight negatives hurts most; dim 64 stays close to base. Depth 1 beats depth 2 "
+              "at this shorter budget.", kicker=f'{_ab_ep} epochs × {_ab_st} steps')
 names = {'base': 'Base (dim 128, 2 layers, 8 bases, 16 neg)', 'layers1': '1 layer',
          'neg8': '8 negatives', 'bases4': '4 bases', 'dim64': 'dim 64'}
 rows = [['Setting', 'MRR', 'H@1', 'H@10', 'MR']]
@@ -517,21 +521,21 @@ best = 1 + max(range(len(ab)), key=lambda i: ab[i]['MRR'])
 table(s, Inches(0.55), Inches(1.5), Inches(8.0), rows, [4.0, 1.0, 1.0, 1.0, 1.0], size=15,
       highlight_row=best, row_h=0.55)
 card(s, Inches(8.9), Inches(1.5), Inches(3.9), Inches(3.3), 'Takeaways', [
-    'All within ≈ 0.03 MRR', '4 bases slightly best', 'dim 64 hurts most',
-    'Depth 1 ≈ depth 2 here'], color=TEAL, size=16)
+    '1 layer strongest', '8 negatives hurts most', 'dim 64 still competitive',
+    'Depth 1 > depth 2 here'], color=TEAL, size=16)
 
 # 16 ─ Error analysis ─────────────────────────────────────────────────────
 ea = R['error_analysis']['mrr_by_degree']
+vals = list(ea.values())
 s = new_slide('Error analysis: rare entities are hard', 'ld',
               "~1:15\nAll relations are many-to-many, so a relation-category breakdown has only one bar. "
-              "Degree is the informative slice: for CompGCN-mult, entities in the lowest degree quartile "
-              "get MRR 0.18, while hubs get 0.55. Sparse entities have little neighborhood for the GNN "
-              "to use. The embedding projection on the right shows loose clusters by entity type.")
+              f"Degree is the informative slice: for CompGCN-mult, the rarest quartile gets MRR {vals[0]:.2f}, "
+              f"while the peak mid/high bin reaches {max(vals):.2f}. Sparse entities have little neighborhood "
+              "for the GNN to use. The embedding projection on the right shows loose clusters by entity type.")
 picture(s, FIG / 'fig_mrr_by_degree.png', Inches(0.4), Inches(1.35), Inches(6.4), Inches(4.0))
 picture(s, FIG / 'fig_umap_entities.png', Inches(7.0), Inches(1.35), Inches(5.8), Inches(4.0))
-vals = list(ea.values())
 bullets(s, Inches(0.55), Inches(5.5), Inches(12.2), Inches(1.4), [
-    ('By degree (CompGCN-mult):', f'MRR {vals[0]:.2f} for the rarest quartile vs {vals[-1]:.2f} for hubs.'),
+    ('By degree (CompGCN-mult):', f'MRR {vals[0]:.2f} for the rarest quartile vs peak {max(vals):.2f}.'),
     ('By relation type:', 'all 51 relations are N–N, so that breakdown is uninformative.'),
 ], size=16, gap=4)
 
@@ -563,10 +567,10 @@ s = new_slide('Conclusion, limitations, future work', 'ld',
 card(s, Inches(0.55), Inches(1.45), Inches(4.0), Inches(5.3), 'Conclusions', [
     'Spark ETL on 4.76M triples in seconds',
     'Sampled GNNs fit a 16 GB T4',
-    'CompGCN-mult best: OGB MRR 0.513',
+    f"CompGCN-mult best: OGB MRR {MAIN['compgcn_mult']['ogb']['mrr_list']:.3f}",
     'GNNs ≫ shallow baselines at equal budget'], color=TEAL, size=16)
 card(s, Inches(4.7), Inches(1.45), Inches(4.0), Inches(5.3), 'Limitations', [
-    'Fast budget; below published SOTA',
+    'Below published long-schedule SOTA',
     'Candidates not GNN-encoded',
     'CompGCN-corr unstable',
     'Spark on a single node'], color=ORANGE, size=16)
