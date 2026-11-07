@@ -18,3 +18,5 @@ report/latex/*.bbl
 report/latex/*.blg
 report/latex/*.out
 report/latex/missfont.log
+*.zip
+tmp/report/

@@ -84,12 +84,15 @@ class CompGCNLayer(nn.Module):
         self.w_rel = nn.Linear(dim, dim, bias=False)
 
     def compose(self, ent: torch.Tensor, rel: torch.Tensor) -> torch.Tensor:
-        if self.op == "sub":
-            return ent - rel
-        if self.op == "mult":
-            return ent * rel
-        if self.op == "corr":
-            return ccorr(ent, rel)
+        # Half-precision FFTs collapse CompGCN-corr under AMP, so composition always runs in float32.
+        with torch.autocast(device_type=ent.device.type, enabled=False):
+            ent, rel = ent.float(), rel.float()
+            if self.op == "sub":
+                return ent - rel
+            if self.op == "mult":
+                return ent * rel
+            if self.op == "corr":
+                return ccorr(ent, rel)
         raise ValueError(self.op)
 
     def forward(self, x: torch.Tensor, rel: torch.Tensor, edge_index: torch.Tensor,
@@ -97,17 +100,19 @@ class CompGCNLayer(nn.Module):
         src, dst = edge_index
         n = x.size(0)
         dim = x.size(1)
-        n_orig_rel = rel.size(0) // 2 if rel.size(0) % 2 == 0 else rel.size(0)
+        # Relation table is |R|; inverse edges use type r+|R| and map back with remainder.
+        n_orig_rel = max(rel.size(0), 1)
         is_inv = edge_type >= n_orig_rel
-        rel_id = torch.remainder(edge_type, max(n_orig_rel, 1))
+        rel_id = torch.remainder(edge_type, n_orig_rel)
         composed = self.compose(x[src], rel[rel_id])
         msg = torch.where(is_inv.unsqueeze(-1), self.w_out(composed), self.w_in(composed))
-        agg = torch.zeros(n, dim, device=x.device, dtype=x.dtype)
+        agg = torch.zeros(n, msg.size(-1), device=msg.device, dtype=msg.dtype)
         agg.index_add_(0, dst, msg)
-        deg = torch.zeros(n, device=x.device, dtype=x.dtype).index_add_(0, dst, torch.ones_like(dst, dtype=x.dtype))
+        deg = torch.zeros(n, device=msg.device, dtype=msg.dtype)
+        deg.index_add_(0, dst, torch.ones(dst.size(0), device=msg.device, dtype=msg.dtype))
         deg = deg.clamp(min=1.0).unsqueeze(-1)
-        out = self.w_loop(x) + agg / deg
-        rel_out = self.w_rel(rel)
+        out = self.w_loop(x).to(dtype=msg.dtype) + agg / deg
+        rel_out = self.w_rel(rel).to(dtype=msg.dtype)
         return out, rel_out
 
 
@@ -120,7 +125,10 @@ class CompGCNEncoder(nn.Module):
         self.layers = nn.ModuleList([CompGCNLayer(dim, n_rel, op) for _ in range(n_layers)])
         self.dropout = nn.Dropout(dropout)
         nn.init.xavier_uniform_(self.ent.weight)
-        nn.init.xavier_uniform_(self.rel.weight)
+        if op == "mult":
+            nn.init.ones_(self.rel.weight)  # h*r starts near h instead of near 0
+        else:
+            nn.init.xavier_uniform_(self.rel.weight)
 
     def encode(self, x: torch.Tensor, edge_index: torch.Tensor, edge_type: torch.Tensor,
                rel_emb: Optional[torch.Tensor] = None) -> tuple[torch.Tensor, torch.Tensor]:

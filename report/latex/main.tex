@@ -1,667 +1,395 @@
 \documentclass[11pt]{article}
-
-% ACL 2023 official style. preprint keeps author names and page numbers
-% (needed for the 8--10 page course report). Use [review] only for anonymous
-% drafts; [final] drops page numbers (camera-ready ACL).
 \usepackage[preprint]{acl}
-
-\usepackage{times}
-\usepackage{latexsym}
+\usepackage{times,latexsym}
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
-% TinyTeX often lacks Adobe Courier (pcrr8t); CM typewriter is fine for \texttt.
-\renewcommand{\ttdefault}{cmtt}
-\usepackage{microtype}
-\usepackage{graphicx}
-\usepackage{booktabs}
-\usepackage{amsmath}
-\usepackage{amssymb}
-\usepackage{url}
-
-\graphicspath{{../figures/}{../../figures/}}
-
-\title{Knowledge Graph Completion with R-GCN and CompGCN:\\
-Link Prediction on Large-Scale Knowledge Graphs}
-
-\author{
-  Charan Ponaganti \\
-  240150024
-  \And
-  M Charan \\
-  240150018
-  \And
-  Lalit Deshmane \\
-  240150044
-}
-
+\usepackage{microtype,graphicx,booktabs,amsmath,url}
+\graphicspath{{../figures/}}
+\title{Knowledge Graph Completion with R-GCN and CompGCN}
+\author{Charan Ponaganti \\ 240150024 \And M Charan \\ 240150018 \And Lalit Deshmane \\ 240150044}
 \begin{document}
 \maketitle
-
 \begin{abstract}
-Knowledge graphs used in biomedical and web-scale applications contain tens of
-thousands to millions of typed edges, so missing-link prediction is both a
-relational-learning problem and a data-processing problem. We study two
-relational graph convolutional encoders --- R-GCN with basis decomposition
-\citep{schlichtkrull2018modeling} and CompGCN with subtraction, multiplication,
-and circular-correlation operators \citep{vashishth2020composition} --- on top
-of a DistMult decoder \citep{yang2015embedding}. Apache Spark
-\citep{zaharia2016apache} is a first-class pipeline stage: triples are cleaned,
-statistically profiled, densely indexed, and handed to the GPU only after
-\texttt{spark.stop()}. Full-batch message passing on Wikidata5M or
-\texttt{ogbl-wikikg2} does not fit a 16\,GB T4, so the learning benchmark is
-\texttt{ogbl-biokg} \citep{hu2020open} with neighbor-sampled mini-batches. On a
-Kaggle Tesla T4 we obtain two evaluation views that do not rank models the same
-way. Under unconstrained 500-candidate ranking DistMult is strongest
-(MRR\,$=0.469$). Under the official OGB evaluator with type-constrained
-negatives, R-GCN leads (MRR\,$=0.704$) and CompGCN-mult is close
-(MRR\,$=0.699$), both clearly above DistMult (MRR\,$=0.550$). CompGCN-corr
-collapsed under mixed-precision FFT. The discrepancy is a result, not a bug in
-the tables: GNN encoders help most when negatives respect entity types, while a
-longer-trained bilinear baseline remains competitive on unconstrained
-candidates. Spark ETL on 4.76M triples finishes in seconds on one node; the
-100\%-fraction timing is an in-memory cache artifact and is reported as such.
+Knowledge graphs store facts as relationships between entities, but many useful relationships are missing. This project investigates whether information from neighbouring entities improves missing-link prediction when training must fit on a single GPU. We combine a PySpark preparation pipeline with R-GCN and three CompGCN variants, using DistMult as their scoring function. The experiments use the biomedical ogbl-biokg dataset and compare these graph models with shallow DistMult, TransE and ComplEx models. In the saved run, CompGCN with multiplication achieves the highest MRR: 0.6307 in the local sampled-candidate test and 0.6201 with the OGB evaluator. R-GCN obtains 0.5490 and 0.5472, respectively. These results favour neighbourhood information under the configured training schedule, although they represent one seed rather than a statistically established model ranking. The report explains the data pipeline, model implementation, evaluation protocols and recorded results. It also identifies limitations in the degree-based diagnostic and Spark timing experiment so that their values are not confused with standard MRR or end-to-end processing time.
+
 \end{abstract}
+\section*{1 Introduction}
+A knowledge graph represents a fact as a triple consisting of a head entity, a relation and a tail entity. For example, an illustrative biomedical triple might connect a drug to a protein through an interaction relation. The graph is useful because each entity can participate in several kinds of relationships. It is also incomplete: an absent edge may indicate a relationship that has not yet been recorded, rather than a relationship that is false.
 
-\section{Introduction and Problem Statement}
+Knowledge graph completion addresses this gap by ranking possible answers to a missing-link query. In tail prediction, the head and relation are known and the model ranks possible tails. Head prediction reverses this task. A useful model should place the recorded answer near the top of the list, while recognising that a query may have more than one valid answer. This is why the candidate set and treatment of other known facts matter as much as the scoring model.
 
-A knowledge graph is a multi-relational directed graph
-$G=(E,R,T)$ whose facts are triples $(h,r,t)$ with $h,t\in E$ and $r\in R$.
-Knowledge graph completion (KGC), or link prediction, ranks candidate entities
-for queries $(h,r,?)$ and $(?,r,t)$. The task is the standard probe for whether
-a model has captured typed relational structure rather than only node homophily
-\citep{bordes2013translating,yang2015embedding,nickel2016review}.
+The project asks a practical question: does adding graph neighbourhood information improve link prediction within a modest training budget? A shallow embedding model learns a vector for each entity and relation from observed triples. A graph neural network also updates an entity representation using its neighbours. That extra information may help, but it increases processing cost and makes the implementation more sensitive to graph size and highly connected entities.
 
-Two constraints define this work. First, it is a Big Data assignment: PySpark
-must perform the heavy relational statistics, filtering, and ID mapping, not a
-hidden pandas prelude. Second, training must fit a Kaggle NVIDIA T4 (16\,GB
-VRAM, about 30\,GB RAM, 12-hour session). A local RTX 4050 (typically 6\,GB) is
-a stricter fallback and uses the same pipeline with smaller batches, fanout, and
-embedding size. These limits rule out training full-batch R-GCN on Wikidata5M
-or \texttt{ogbl-wikikg2}. Entity embeddings alone for 4.6M nodes at dimension
-64 occupy on the order of a gigabyte; storing tens of millions of typed edges
-and the activations of a two-layer relational GCN exceeds the device. The
-honest design is therefore Spark on the large dump, and neighbor-sampled GNN
-training on \texttt{ogbl-biokg}.
+Our implementation separates data preparation from model training. PySpark cleans and profiles the triples, prepares identifiers and exports the graph. PyTorch then trains the models on sampled neighbourhoods. This separation makes the Big Data component explicit while keeping the learning stage within the memory available on a Kaggle Tesla T4. An RTX 4050 configuration is included for smaller runs, but the reported measurements come from the T4 configuration.
 
-\paragraph{Contributions.}
-(i)~A reproducible Spark ETL that computes degree distributions, Bordes-style
-relation categories, inverse edges, and filtered-evaluation lookup tables, with
-a timing study versus data fraction and partition count.
-(ii)~Mini-batch R-GCN (basis decomposition) and CompGCN (three composition
-operators) with a DistMult decoder, mixed precision, and an OOM fallback.
-(iii)~A query-side GNN encoder that message-passes only around the query entity
-while scoring candidates from a global entity table, which is what actually
-fits a T4 at dimension 128.
-(iv)~Two evaluation protocols on the same checkpoint --- unconstrained
-filtered-candidate ranking and the official OGB evaluator --- which reverse the
-model ranking and are both reported.
+The main contribution is an implemented comparison with traceable results, rather than a new graph architecture. We compare R-GCN, CompGCN subtraction, CompGCN multiplication and CompGCN circular correlation with three shallow models. We explain both evaluation procedures, examine the trade-off between ranking quality and training time, and analyse a small R-GCN parameter sweep. We also document where the saved evidence does not support a stronger conclusion.
 
-\section{Related Work}
+\subsection*{1.1 Scope of the investigation}
+The experiments are transductive: the model learns embeddings for the entities represented in the prepared graph. The report does not claim that the trained model can embed an entirely new biomedical entity without further training. It also does not test whether predicted links are clinically correct. The task is benchmark link ranking, evaluated against the dataset's held-out facts.
 
-\subsection{Translational and bilinear embeddings}
+The results are taken from the repository's results.json and checked against main\_results.csv, ogb\_results.csv, ablation.json and spark\_scale.csv. The self-contained notebook is the implementation reference because it does not import the Python modules under src. Those modules are useful for reading individual concepts, but some details differ from the notebook. The distinction is important when reproducing an experiment: running an illustrative helper is not equivalent to running the saved notebook configuration.
 
-TransE \citep{bordes2013translating} scores a triple by how well
-$t \approx h + r$ in Euclidean space and still serves as a simple decoder.
-DistMult \citep{yang2015embedding} replaces translation with a bilinear product
-$\langle h, r, t \rangle = h^{\top}\mathrm{diag}(r)\,t$; it is cheap,
-parallelizable, and surprisingly strong on symmetric relations. ComplEx
-\citep{trouillon2016complex} and RotatE \citep{sun2019rotate} add complex-space
-capacity that DistMult lacks. ConvE \citep{dettmers2018convolutional}
-2D-convolves stacked embeddings and, together with WN18RR, documented the
-test-set leakage issues of WN18/FB15k that motivated FB15k-237
-\citep{toutanova2015observed}. We keep DistMult as the required decoder so
-encoder differences are not confounded by a heavier scoring function.
+\section*{2 Background and Related Work}
+\subsection*{2.1 Embedding models}
+DistMult assigns each entity and relation a vector and scores a triple by multiplying their corresponding coordinates and summing the products (Yang et al., 2015). Its simplicity makes it a useful baseline. If graph models cannot improve on it under the chosen conditions, their extra neighbourhood processing may not be justified. Its basic score is symmetric in the two entity vectors, which limits how the shallow model represents asymmetric relationships.
 
-\subsection{Relational graph convolutions}
+TransE takes a different approach: it treats a relation as a translation from the head vector towards the tail vector (Bordes et al., 2013). A small distance between the translated head and the tail gives a high score. ComplEx uses complex-valued embeddings to represent a richer set of relationships (Trouillon et al., 2016). In this notebook, the real and imaginary parts occupy two halves of the same 128-coordinate storage vector. Thus the comparison uses 64 complex coordinates, not 128 complex coordinates.
 
-R-GCN \citep{schlichtkrull2018modeling} extends the graph convolution of
-\citet{kipf2017semi} with a relation-specific matrix $W_r$ and a self-loop
-$W_0$. Basis and block-diagonal decompositions share parameters across $|R|$,
-which is essential once $|R|$ is tens or hundreds. CompGCN
-\citep{vashishth2020composition} argues that relations should participate in
-the message itself through a composition $\phi(h_s, h_r)$ and
-direction-specific weights for original, inverse, and self-loop edges. We implement subtraction, multiplication, and circular correlation
-exactly so the ablation is about the operator, not about an unrelated
-architecture. Neighbor sampling \citep{hamilton2017inductive} is how these
-layers run on graphs that do not fit in GPU memory as a single adjacency.
-Surveys \citep{nickel2016review,rossi2021knowledge} locate these models between
-shallow embeddings and inductive subgraph reasoners such as GraIL
-\citep{teru2020inductive}; this work stays transductive, matching
-\texttt{ogbl-biokg}.
+These models provide useful reference points because they do not require message passing. In the project, TransE and ComplEx are independently trained shallow models. They are not experiments that replace the decoder while keeping a trained R-GCN or CompGCN encoder fixed. Calling them decoder-only baselines avoids attributing their results to graph representations they never use.
 
-\subsection{Benchmarks and engines}
+\subsection*{2.2 Learning from relations and neighbours}
+R-GCN extends graph convolution to graphs with labelled relations (Schlichtkrull et al., 2018). Neighbours connected through different relations contribute through different transformations. Basis decomposition expresses these transformations using a smaller collection of shared matrices. The resulting model can use relation-specific information without learning a completely independent dense matrix for every relation in every layer.
 
-Open Graph Benchmark \citep{hu2020open} standardizes splits and evaluators;
-\texttt{ogbl-biokg} is a biomedical KG with type-constrained negatives, and
-\texttt{ogbl-wikikg2} is a Wikidata-derived graph with 2.5M entities. Wikidata5M
-\citep{wang2021kepler} was released with KEPLER and remains the canonical
-five-million-entity lexicalized KG. Apache Spark \citep{zaharia2016apache} is
-the distributed engine we use in \texttt{local[*]} mode on a single Kaggle node:
-the value is not a cluster, but a relational plan (joins, \texttt{groupBy},
-window ids) that would be painful and memory-opaque in ad-hoc Python. We
-implement message passing with PyTorch Geometric \citep{fey2019fast}.
+CompGCN combines an entity vector with a relation vector before aggregating messages, and updates relation representations across layers (Vashishth et al., 2020). The composition operator determines how those vectors interact. This project implements subtraction, elementwise multiplication and circular correlation. The implementation is an adaptation for sampled query-side scoring; its results should not be described as a full reproduction of every architectural and experimental choice in the original paper.
 
-\section{Dataset Description and Big Data Challenges}
+Neighbour sampling limits how much of the graph is processed for a mini-batch. The general idea is to select a bounded number of neighbours instead of expanding every adjacent edge, as in sampling-based graph representation learning (Hamilton et al., 2017). This sacrifices some neighbourhood information but makes memory use more manageable. In this project, it is especially relevant because a small number of entities have much higher degree than the median entity.
 
-Table~\ref{tab:datasets} compares the candidates using published sizes, not our
-training scores. Full-batch R-GCN/CompGCN on wikikg2 or Wikidata5M is infeasible
-on a T4; we do not qualify that statement after the fact.
+\subsection*{2.3 Benchmark and processing framework}
+Open Graph Benchmark provides datasets, splits and evaluation utilities intended to make graph-learning experiments easier to compare (Hu et al., 2020). We use its biomedical knowledge graph and report the OGB evaluator output separately from the notebook's smaller local test. The distinction prevents a sampled score obtained with one candidate construction from being treated as interchangeable with another.
 
-\begin{table}[t]
-\centering
-\small
+Spark provides DataFrame operations for cleaning, grouping and joining the triples (Zaharia et al., 2016). Here it runs in local mode on one machine. This is a real Spark workflow, but it is not evidence of performance on a multi-machine cluster. PyTorch Geometric supplies the R-GCN convolution used by the notebook (Fey and Lenssen, 2019), while the CompGCN layer and neighbourhood sampler are implemented directly in PyTorch.
+
+\section*{3 Dataset and Problem Formulation}
+\subsection*{3.1 The graph used in the experiments}
+The recorded experiment uses ogbl-biokg. After cleaning, the saved graph statistics contain 93,773 entities, 51 original relations and 4,762,676 training triples. The original training count in the notebook is 4,762,678, so cleaning removes two rows in total. The export combines duplicates and self-loops in one removal count; it does not identify how many belonged to each category. Table 1 summarises the prepared graph.
+
+\begin{table}[t]\centering\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lr}
+\toprule
+Statistic & Value \\ \midrule
+Entities & 93,773 \\
+Original relations & 51 \\
+Training triples & 4,762,676 \\
+Rows removed in cleaning & 2 \\
+Message relation identifiers & 102 \\
+Minimum / median degree & 1 / 22 \\
+Mean degree & 101.58 \\
+99th percentile degree & 1,279.28 \\
+Maximum degree & 62,733 \\
+Many-to-many relations & 51 \\
+\bottomrule\end{tabular}
+\caption{Prepared BioKG training graph. Counts are from the saved Spark statistics.}\end{table}
+Entity identifiers require care because biomedical entity types have separate local identifier spaces. The loader applies type offsets to obtain global identifiers, and the Spark stage preserves those numeric identifiers. Without this step, the same local integer could refer to different entities in different types. More subtly, assigning a new identifier order after Spark processing would invalidate the official OGB negative lists unless they were remapped consistently.
+
+The graph has a strongly uneven degree distribution. Its median degree is 22, whereas its mean is about 101.58 and its maximum is 62,733. Degree here counts appearances as a head or tail in the training triples. It is not the number of distinct neighbouring entities: several relations or triples can contribute to the count. This definition explains what the saved summary and degree-based analysis actually measure.
+
+\begin{figure}[t]\centering
+\includegraphics[width=\columnwidth]{fig_degree_loglog.png}
+\caption{Training-graph degree distribution from the repository. Degrees count head and tail occurrences. The large difference between median and maximum motivates bounded neighbourhood sampling.}\end{figure}
+The notebook also classifies relations by the average number of tails per head and heads per tail, using a threshold of 1.5. All 51 relations fall into the many-to-many category under this rule. That finding describes the averages for this dataset. It does not imply that every entity pair participates in many relationships, and it leaves no separate one-to-one or one-to-many groups for a category comparison.
+
+\subsection*{3.2 Dataset alternatives and memory}
+The repository includes loaders for an FB15k-237 smoke test and a degree-filtered Wikidata5M subset. These paths are useful for debugging and exploring larger raw graphs, but neither is the source of the reported result tables. The presence of a loader is not evidence that a complete experiment on that dataset has been performed. The report therefore keeps its empirical conclusions limited to ogbl-biokg.
+
+Memory use involves more than storing the entity vectors. At dimension 128, the BioKG entity table contains 12,002,944 float32 values, or about 48.0 MB in decimal units. Gradients and Adam states add storage, and neighbourhood messages and intermediate activations can consume much more during training. Inverse edges also enlarge the message graph. These costs explain the use of sampling without requiring an unmeasured claim that every possible full-batch implementation must fail.
+
+For larger graphs such as Wikidata5M, even the entity table becomes much larger, and edge processing adds further pressure. The notebook's subset path filters by degree and repeatedly removes low-degree entities. Such a subset changes the learning problem and favours more connected entities, so results on it would need to be reported as subset results. No full Wikidata5M or ogbl-wikikg2 training score is claimed here.
+
+\subsection*{3.3 What constitutes a prediction}
+Let a triple be written as (h, r, t), where h and t are entities and r is a relation. A scoring function assigns a real number to each possible triple. For a tail query, candidates are compared through scores for (h, r, candidate). For a head query, scores are computed for (candidate, r, t). Larger scores indicate a more plausible answer according to the model.
+
+A ranking is meaningful only relative to its candidate list. Ranking the correct entity among a few hundred sampled alternatives is a different task from ranking it against every entity. The meaning also changes if alternatives are restricted to the correct biomedical type. We therefore state the number of sampled alternatives, the type restriction, the filtering rule and the evaluation direction whenever interpreting a metric.
+
+\section*{4 Data Preparation with PySpark}
+\subsection*{4.1 Ingestion and cleaning}
+The notebook first loads triples into host memory, constructs pandas DataFrames and passes them to Spark with an explicit schema. If that conversion fails, it writes a tab-separated intermediate file and reads it through Spark. This design makes the ingestion path straightforward on Kaggle, but host memory remains a constraint. It is not a fully distributed reader that streams an arbitrarily large dataset directly from external storage.
+
+Spark removes null values, empty identifiers, duplicate triples and self-loops. It processes the training, validation and test splits separately. Keeping the split distinction is essential: held-out triples must not enter the graph used for learning neighbourhood representations. Removing self-loops is a preprocessing decision, not a universal requirement of knowledge graphs; in another application, a self-relation might carry meaningful information.
+
+The cleaned training DataFrame is cached because several later operations reuse it. Spark computes entity occurrence counts and relation categories. The notebook then collects the degree column into pandas to calculate the median, mean, percentile and extremes. Thus Spark performs the graph aggregation, while the final numerical summary is calculated locally. This is a more accurate description than saying that every reported statistic is computed entirely inside Spark.
+
+\subsection*{4.2 Indexing and graph construction}
+For the OGB data, numeric global identifiers are preserved. For string-based datasets, the notebook constructs dense mappings and joins them back to the triples. The mappings are derived from the training graph, so validation and test entities not represented there can be excluded by the joins. A future dataset run should record the counts before and after this step to make its evaluation coverage explicit.
+
+An inverse message edge is added for each training triple. If the original edge is (h, r, t), the inverse is (t, r + 51, h) for this run. This produces 102 message-passing relation identifiers. Inverse edges let information travel in both directions, but they do not add new original relation labels to the prediction task. The scoring relation table still corresponds to the 51 original relations.
+
+The pipeline writes indexed splits, entity and relation mappings, inverse-edge training data, relation categories and known-answer tables as Parquet files. Parquet provides a structured handoff that can be inspected independently of training. The exported tables also make it easier to determine whether a later problem arose in identifier mapping, graph construction or model scoring.
+
+\subsection*{4.3 Filtering and the handoff to PyTorch}
+Filtered evaluation avoids penalising a model for ranking another known correct answer above the selected target. The notebook builds known-triple information from the union of training, validation and test triples. This union is used to mask alternatives during evaluation, not to construct the training message graph. Using held-out facts solely for filtering is distinct from using them as training edges.
+
+The GPU lookup encodes an indexed triple as key = (h $\times$ R + r) $\times$ E + t, where E and R are the entity and original-relation counts. Sorted 64-bit keys allow vectorised membership checks. For this graph, even the largest possible key is below 4.49 $\times$ 10\textasciicircum{}11, comfortably inside the signed 64-bit range. Correct identifier bounds are necessary for this encoding to avoid collisions.
+
+Finally, the notebook converts the prepared data into arrays and tensors, constructs the adjacency used by the sampler, and stops Spark before GPU training. Stopping the session releases resources associated with the Spark process and reduces competition for host memory. The overall flow is therefore ingestion, cleaning, indexing, export, graph sampling, training and evaluation, with saved files connecting the stages.
+
+\section*{5 Model Design and Training}
+\subsection*{5.1 Shared scoring and the shallow baseline}
+DistMult uses the score s(h, r, t) = $\Sigma$j hj rj tj, summed over the embedding coordinates. For the shallow baseline, all three vectors are taken directly from learned embedding tables. For the graph models, the entity on the known query side is contextualised by the encoder. A residual connection adds its original embedding back to the encoded vector before scoring candidates.
+
+This query-side design avoids encoding every candidate neighbourhood for every query. Candidates use the global entity embedding table. In tail prediction, the known head is encoded; in head prediction, the known tail is encoded. The resulting system is less expensive than contextualising both sides for every candidate, but it does not have the same behaviour as a fully encoded graph scorer. This implementation choice is part of the method being evaluated.
+
+\subsection*{5.2 R-GCN with shared bases}
+Each R-GCN layer combines transformed messages from neighbouring entities and a transformation of the entity itself. A relation determines which message transformation is used. Neighbourhood normalisation prevents a simple sum from growing only because more messages arrive. The notebook uses PyTorch Geometric's RGCNConv and applies ReLU and dropout between layers.
+
+With basis decomposition, a relation matrix is expressed as Wr = $\Sigma$b arb Vb. The Vb matrices are shared, and the arb coefficients select their mixture for relation r. The recorded configuration has two layers, eight bases and 128-dimensional embeddings. Increasing the number of bases offers more relation-specific flexibility, while fewer bases reduce the number of matrix parameters. The ablation experiment later checks whether that additional flexibility helps within the shorter schedule.
+
+The message graph includes both original and inverse relation identifiers. R-GCN can therefore use separate transformations for these directions. Its decoder relation embeddings are learned separately from the convolution matrices. This separation is useful to understand: the convolution determines how neighbourhood evidence changes an entity vector, and the decoder determines how that vector is scored for a query relation.
+
+\subsection*{5.3 CompGCN implementation}
+CompGCN first composes the source entity vector with a relation vector. Subtraction computes e - r, multiplication computes e $\odot$ r, and circular correlation combines coordinates through a circular shift interaction implemented with real FFT operations. The composed message is transformed by an incoming or outgoing weight matrix. The layer averages received messages and adds a separate linear transformation of the entity itself.
+
+In this implementation, inverse edge identifiers map back to the same underlying relation embedding as their original relation. Direction is distinguished by the incoming and outgoing matrices. A learned relation transformation updates the relation table after each layer, and the final transformed relations are used by the decoder. These details distinguish the implementation from a generic equation that leaves inverse relations and self-loops unspecified.
+
+The multiplication variant starts its relation vectors at ones, so the initial composition preserves the entity vector. Subtraction and correlation use Xavier initialisation for the relation table. Consequently, the comparison changes both the operator and its associated initialisation. The results establish how the implemented variants behave; they do not isolate the operator as the only causal difference.
+
+All composition operators run in float32 with autocast disabled inside the composition step. Other CUDA operations can still use mixed precision. This protects the FFT path from half-precision constraints, but it does not guarantee that correlation will optimise well. A poor score after this precaution is evidence about the saved configuration, not proof that circular correlation is unsuitable for knowledge graphs.
+
+\subsection*{5.4 Sampling and optimisation}
+The sampler stores adjacency in compressed sparse row form and samples bounded neighbourhoods around the query entities. The configured fanout is ten neighbours at each of two expansion steps. Sampling is with replacement, so repeated neighbours are possible and the fanout is not a promise of ten distinct neighbours. The sampled edges are assembled into a local graph for message passing.
+
+Each optimisation step includes both head and tail prediction. The training batch contains 512 triples, with 16 negative alternatives for each direction. On BioKG, negative sampling uses the entity type of the argument being corrupted. Harder negatives receive greater weight through a detached softmax of their scores, following the self-adversarial weighting idea used by RotatE (Sun et al., 2019).
+
+The loss averages the head and tail objectives. Adam uses a learning rate of 0.001 and weight decay of 0.00001, with gradient clipping at 1.0. Dropout is 0.2 between graph layers. Although a label-smoothing constant appears in the configuration, the active self-adversarial loss does not use it; smoothing applies only to the alternative binary cross-entropy path. It should therefore not be listed as an active feature of this run.
+
+Each configured epoch samples 600 batches with replacement rather than making a complete pass through the training graph. Twelve such epochs allow at most 7,200 updates and 3,686,400 sampled triple presentations per model before early stopping or skipped batches. This is fewer presentations than the number of training triples, and repeated samples reduce distinct coverage further. The word epoch in this notebook therefore denotes a fixed training interval, not full-dataset coverage.
+
+\subsection*{5.5 Checkpoints and practical safeguards}
+Validation selects the best checkpoint using tail-only sampled MRR. The long-run preset uses up to 2,000 validation triples and 100 sampled negatives per query, with patience five. This validation procedure is smaller than the final test and does not use the official OGB score for checkpoint selection. Selecting on tail performance may also matter when head and tail results differ substantially.
+
+The training loop skips non-finite losses and attempts to reduce batch size and fanout after a GPU out-of-memory error. It also saves partial results and model checkpoints so an interrupted session can resume. These safeguards improve usability, but successful-step counts and any changed sampling settings should be recorded when comparing runs. Equal configured schedules do not necessarily imply equal numbers of completed updates.
+
+\section*{6 Experimental Setup and Metrics}
+\subsection*{6.1 Recorded configuration}
+The saved run identifies a Tesla T4 with approximately 15.6 GB of memory, the long budget and QUICK\_RUN set to false. Seed 42 is recorded for evaluation and used by the notebook's seeding routine. Table 2 lists the main settings. The checked-in notebook still defaults to the fast budget, so reproducing these results requires explicitly selecting long. The RTX 4050 preset is supported but is not a second measured experiment here.
+
+\begin{table}[t]\centering\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lr}
+\toprule
+Setting & Value \\ \midrule
+Embedding coordinates & 128 \\
+GNN layers / R-GCN bases & 2 / 8 \\
+Batch size & 512 \\
+Fanout per hop & 10, 10 \\
+Maximum epochs $\times$ steps & 12 $\times$ 600 \\
+Negatives per direction & 16 \\
+Learning rate & 0.001 \\
+Weight decay & 0.00001 \\
+Dropout / gradient clip & 0.2 / 1.0 \\
+Local test triples & 15,000 \\
+Local sampled negatives & 500 \\
+OGB test triples & 162,870 \\
+\bottomrule\end{tabular}
+\caption{Main-run settings from the saved configuration. Epochs are fixed sampled intervals.}\end{table}
+All seven models have the same configured maximum epochs, steps per epoch and number of training negatives. This is a matched update schedule, not matched computation. One R-GCN update costs more than a DistMult update, and early stopping can shorten a run. Likewise, the models do not have identical parameter counts or exactly identical random samples, because their execution consumes randomness differently.
+
+\subsection*{6.2 Interpreting ranking metrics}
+For a query with rank q, reciprocal rank is 1/q. Mean reciprocal rank, or MRR, averages these values over all evaluated queries. Mean rank, or MR, averages q itself. Hits@k is the fraction of queries for which q is at most k. Higher MRR and Hits@k are better; lower MR is better. MRR emphasises getting answers very near the top, whereas MR can be strongly affected by a few very poor ranks.
+
+For example, suppose four queries have ranks 1, 2, 5 and 10. Their MR is 4.5 and their MRR is (1 + 0.5 + 0.2 + 0.1)/4 = 0.45. Hits@1 is 0.25, Hits@3 is 0.50 and Hits@10 is 1.00. This example is illustrative, not an additional experiment. It shows why a score of 0.45 is not the same as saying that 45 percent of predictions are correct at rank one.
+
+\subsection*{6.3 Local sampled-candidate evaluation}
+The local test takes the first 15,000 triples of the prepared test array. Each triple generates a head query and a tail query, giving 30,000 directional ranks. A query contains the true entity plus 500 sampled alternatives. The saved n\_candidates value describes the alternatives, so the initial score matrix has 501 entries per query. Sampling with replacement can repeat alternatives, meaning these are not necessarily 501 distinct entities.
+
+The candidate generator is the same type-aware corruption helper used in training. With the saved BioKG settings, the local test is therefore also type-aware; it is not an unconstrained sample from all entities. Other known true triples are masked through the lookup table. A tie with the positive score counts against the target because the ranking code uses greater-than-or-equal comparisons for negatives. This is a pessimistic tie rule.
+
+The candidate generator is reset to seed 42 for each evaluation, which aligns candidate sampling between models under the same batching. Graph neighbourhood sampling uses the global random generator separately, so contextualised queries can still vary between evaluation calls. The first 15,000 prepared rows are also not documented as a stratified test sample. Their results should be read as a local diagnostic, not a complete replacement for the benchmark test.
+
+\subsection*{6.4 OGB evaluation}
+The second procedure scores all 162,870 original OGB test triples in both directions and passes the positive and supplied negative scores to the OGB evaluator. The notebook preserves the original test order so that each positive remains paired with its corresponding negative list. The saved metrics average the evaluator's per-query outputs across head and tail predictions.
+
+OGB's BioKG protocol supplies 500 type-compatible negative entities for each corruption direction (Open Graph Benchmark, n.d.). Both procedures therefore involve sampled negatives, but they differ in which triples are evaluated, which negative lists are used, filtering and tie handling. The OGB results are the more appropriate benchmark reference. A difference between the two columns cannot be explained simply as unrestricted candidates versus type-restricted candidates.
+
+\section*{7 Results and Discussion}
+\subsection*{7.1 Local ranking results}
+Table 3 reports the saved local MRR and Hits metrics, rounded to four decimal places. CompGCN-mult leads with MRR 0.6307 and Hits@10 0.8668. CompGCN-sub follows at 0.5763 MRR, then R-GCN at 0.5490. DistMult is now the strongest shallow model at 0.3484, followed by TransE at 0.2847 and ComplEx at 0.2748. Correlation performs very poorly, with MRR 0.0021 and zero Hits@1, Hits@3 and Hits@10.
+
+\begin{table}[t]\centering\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lrrrr}
+\toprule
+Model & MRR & H@1 & H@3 & H@10 \\ \midrule
+DistMult & 0.3484 & 0.2432 & 0.3912 & 0.5617 \\
+R-GCN & 0.5490 & 0.4205 & 0.6236 & 0.7978 \\
+CompGCN-sub & 0.5763 & 0.4468 & 0.6541 & 0.8280 \\
+CompGCN-mult & 0.6307 & 0.5043 & 0.7138 & 0.8668 \\
+CompGCN-corr & 0.0021 & 0.0000 & 0.0000 & 0.0000 \\
+TransE & 0.2847 & 0.1718 & 0.3263 & 0.5189 \\
+ComplEx & 0.2748 & 0.1865 & 0.3084 & 0.4479 \\
+\bottomrule\end{tabular}
+\caption{Local filtered sampled-candidate results on 15,000 triples, evaluated in both directions.}\end{table}
+CompGCN-mult improves on R-GCN by 0.0817 MRR in the local test, and on DistMult by 0.2823. These are absolute differences on the MRR scale. They describe the saved comparison and are not guaranteed gains on other datasets or seeds. Multiplication also exceeds subtraction by 0.0543. Repeated runs would help determine whether these gaps are stable under changes in sampling and initialisation.
+
+MR agrees with the leading MRR result in this run. CompGCN-mult has the lowest mean rank, 9.48, compared with 11.65 for subtraction and 13.47 for R-GCN. The strongest model therefore combines more high-ranked answers with a better average rank. Correlation's MR is 485.13 among 501 initial scored entries, placing it near the bottom of the local candidate ranking. Reporting MR makes that failure more visible than MRR alone.
+
+\subsection*{7.2 OGB results}
+Table 4 gives the OGB evaluator results. CompGCN-mult again has the highest MRR, 0.6201, followed by CompGCN-sub at 0.5780 and R-GCN at 0.5472. The full seven-model MRR ordering is identical across the two procedures. Their agreement supports the observation that the implemented graph encoders outperform shallow DistMult within this schedule, while preserving the distinction between the evaluation protocols.
+
+\begin{table}[t]\centering\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lrrrr}
+\toprule
+Model & MRR & H@1 & H@3 & H@10 \\ \midrule
+DistMult & 0.3252 & 0.2244 & 0.3636 & 0.5264 \\
+R-GCN & 0.5472 & 0.4344 & 0.6059 & 0.7679 \\
+CompGCN-sub & 0.5780 & 0.4639 & 0.6411 & 0.7994 \\
+CompGCN-mult & 0.6201 & 0.5054 & 0.6911 & 0.8353 \\
+CompGCN-corr & 0.0040 & 0.0000 & 0.0000 & 0.0000 \\
+TransE & 0.2701 & 0.1649 & 0.3046 & 0.4897 \\
+ComplEx & 0.2504 & 0.1684 & 0.2776 & 0.4100 \\
+\bottomrule\end{tabular}
+\caption{OGB evaluator results on all 162,870 original test triples, with head and tail queries.}\end{table}
+DistMult has OGB MRR 0.3252, followed by TransE at 0.2701 and ComplEx at 0.2504. DistMult changes from 0.3484 locally to 0.3252 with OGB, while multiplication changes from 0.6307 to 0.6201. Subtraction and R-GCN also have similar aggregate scores under the two procedures. These agreements do not make the protocols interchangeable: they use different test populations and negative lists, and correlation behaves differently under their tie rules.
+
+\begin{figure}[t]\centering
+\includegraphics[width=\columnwidth]{fig_ogb_bars.png}
+\caption{Saved OGB MRR and Hits@10 results. Multiplication has the strongest recorded performance, with subtraction close behind. These are single-run scores without confidence intervals.}\end{figure}
+The absolute OGB MRR advantage of multiplication over R-GCN is 0.0729; its advantage over subtraction is 0.0421. No standard deviations or confidence intervals are available, so neither difference is described as statistically significant. The evidence identifies the strongest recorded configuration rather than establishing universal superiority. The longer run also changes the shallow-model ordering relative to the earlier export, making it important to refresh conclusions as well as tables.
+
+\subsection*{7.3 Head prediction and tail prediction}
+The saved local metrics separate the two directions. Multiplication reaches tail MRR 0.6724 and head MRR 0.5889. R-GCN has the same direction of imbalance, at 0.5901 and 0.5080. DistMult has a smaller difference, 0.3625 versus 0.3343, but lower performance in both directions. Table 5 makes the asymmetry explicit.
+
+\begin{table}[t]\centering\small
+\setlength{\tabcolsep}{3pt}
 \begin{tabular}{lrrr}
 \toprule
-Dataset & $|E|$ & $|R|$ & Train triples \\
-\midrule
-\texttt{ogbl-biokg} & 93{,}773 & 51 & 4.76M \\
-\texttt{ogbl-wikikg2} & 2.50M & 535 & 16.1M \\
-Wikidata5M & 4.59M & 822 & 20.6M \\
-FB15k-237 & 14{,}541 & 237 & 272k \\
-WN18RR & 40{,}943 & 11 & 87k \\
-\bottomrule
-\end{tabular}
-\caption{Candidate KGs. Sizes follow \citet{hu2020open}, \citet{wang2021kepler},
-\citet{toutanova2015observed}, and \citet{dettmers2018convolutional}.
-\texttt{ogbl-biokg} is the only large OGB KG whose entity table and sampled
-neighborhoods fit both a T4 at dim 128 and, with a tighter preset, a 6\,GB
-RTX 4050. Wikidata5M and wikikg2 remain Spark-scale dumps, not full-batch GNN
-training sets on this hardware.}
-\label{tab:datasets}
-\end{table}
+Model & Tail & Head & Gap \\ \midrule
+DistMult & 0.3625 & 0.3343 & 0.0282 \\
+R-GCN & 0.5901 & 0.5080 & 0.0821 \\
+CompGCN-sub & 0.6143 & 0.5384 & 0.0760 \\
+CompGCN-mult & 0.6724 & 0.5889 & 0.0835 \\
+CompGCN-corr & 0.0021 & 0.0021 & 0.0001 \\
+TransE & 0.2981 & 0.2714 & 0.0267 \\
+ComplEx & 0.2854 & 0.2642 & 0.0212 \\
+\bottomrule\end{tabular}
+\caption{Directional MRR in the local test. Gap is tail MRR minus head MRR.}\end{table}
+For multiplication, the gap is 0.0835. Head prediction remains weaker, even though the long-run results are less imbalanced than the earlier export. The changed local test size prevents treating that difference as a controlled before-and-after comparison. Possible influences include relation distribution, candidate pools, query-side encoding and tail-only checkpoint selection. A useful follow-up would report per-relation directional metrics and select checkpoints using bidirectional validation.
 
-\paragraph{Primary choice: \texttt{ogbl-biokg}.}
-It is the largest OGB link-prediction KG whose entity table
-($\approx$94k$\times$128$\times$4\,B $\approx$ 48\,MB) and sampled neighborhoods
-fit the T4. It also gives the official \texttt{Evaluator} and type-aware
-negatives, which is the scientifically cleaner protocol \citep{hu2020open}.
-Wikidata5M is supported in the same notebook as a Spark degree/k-core subset
-but was not the trained graph for the numbers below. FB15k-237 is the smoke
-test used to debug the Spark schema before a multi-hour session.
+\subsection*{7.4 Training cost}
+The exported train\_hours values sum timed training epochs and exclude validation and final evaluation. Converting them to minutes gives approximately 1.56 for DistMult, 31.56 for R-GCN, 7.56 for subtraction, 7.62 for multiplication, 4.44 for correlation, 1.44 for TransE and 1.50 for ComplEx. These measurements illustrate why equal configured update counts do not imply equal resource use. Correlation's shorter duration is not evidence of a useful efficiency gain given its failed ranking results.
 
-After Spark cleaning, the indexed \texttt{ogbl-biokg} graph has
-\textbf{93{,}773 entities}, \textbf{51 relations}, and \textbf{4{,}762{,}676
-training triples}. Two duplicate or self-loop triples were removed. Degree
-statistics are heavy-tailed: min 1, median 22, mean 101.6, P99 1{,}279, max
-62{,}733 (Table~\ref{tab:spark}). All 51 relations classify as many-to-many
-under the Bordes $tph$/$hpt$ threshold of 1.5. Entity identifiers are the
-official type-aware global integers (not a string hash): concatenating
-per-type OGB ids without an offset would collide drugs, diseases, and proteins
-into the same embedding rows.
+Multiplication's recorded training time is about one quarter of R-GCN's, while its OGB MRR is higher. That makes it an attractive configuration within this implementation. This is not a benchmark of optimally tuned R-GCN against optimally tuned CompGCN: different kernels, parameterisations and sampling interactions can affect the timing. The result is a practical comparison of the supplied code paths.
 
-\begin{table}[t]
-\centering
-\small
+The JSON records a notebook wall time of 1.755 hours, or 105.3 minutes. Since the notebook supports resuming previously completed work, this field should not automatically be interpreted as a guaranteed clean-start runtime for reproducing every artifact. A future run should save whether it resumed, dependency versions, successful update counts and peak memory alongside the time measurements.
+
+\section*{8 Ablations and Error Analysis}
+\subsection*{8.1 R-GCN parameter sweep}
+The R-GCN ablations use six epochs of 300 steps each. This is 1,800 configured updates, one quarter of the 7,200-update main schedule, even though both the number of epochs and steps per epoch are halved. Comparisons within Table 6 are meaningful as a shorter-budget sweep. They should not be treated as equal-budget alternatives to the main R-GCN result.
+
+\begin{table}[t]\centering\small
+\setlength{\tabcolsep}{3pt}
+\begin{tabular}{lrrr}
+\toprule
+Setting & MRR & H@1 & H@10 \\ \midrule
+Short-budget base & 0.4115 & 0.2913 & 0.6553 \\
+One layer & 0.4494 & 0.3231 & 0.7005 \\
+Eight negatives & 0.3317 & 0.2135 & 0.5820 \\
+Four bases & 0.3950 & 0.2704 & 0.6438 \\
+Dimension 64 & 0.4364 & 0.3160 & 0.6789 \\
+\bottomrule\end{tabular}
+\caption{R-GCN ablations with 1,800 configured updates each. The main schedule allows 7,200 updates.}\end{table}
+The one-layer setting has the highest MRR in the sweep, 0.4494, compared with 0.4115 for the short-budget base. Reducing dimension to 64 gives 0.4364. Four bases yields 0.3950, and eight negatives gives the lowest score, 0.3317. The strongest ablation therefore changes from the earlier export. Repeated seeds are needed before treating the observed preference for one layer as a reliable general result.
+
+The sweep suggests that additional depth is not automatically helpful under limited training. One layer leads both MRR and Hits@10, with Hits@10 of 0.7005. A 64-dimensional encoder also exceeds the base on both measures. However, reducing the number of negatives or bases lowers MRR in this run. These results favour selective simplification rather than reducing every resource setting together; the experiment does not establish the optimisation mechanism behind the differences.
+
+\subsection*{8.2 What the degree diagnostic measures}
+The repository contains degree-based values labelled MRR, but the code computes them differently from the main metric. It first averages the head and tail ranks for each triple, then takes the reciprocal. Its per-triple value is therefore 2/(q\_head + q\_tail). Standard bidirectional MRR instead averages 1/q\_head and 1/q\_tail. These expressions are generally unequal.
+
+For example, head and tail ranks of 1 and 9 produce standard bidirectional MRR of about 0.5556. Taking the reciprocal of the mean rank gives 0.2. The second statistic penalises an imbalance between directions more strongly. Consequently, the saved category value 0.5041 should not be compared directly with multiplication's main MRR of 0.6307, nor explained away as merely a different slice of the same metric.
+
+Table 7 retains the saved degree values but labels them as a reciprocal-mean-rank diagnostic. The groups are quartiles of head occurrence degree among evaluated triples, not quartiles of all entities in the graph. Common entities can appear in many evaluated triples, so this grouping has a different interpretation from dividing the entity set into four equally sized groups.
+
+\begin{table}[t]\centering\small
+\setlength{\tabcolsep}{3pt}
 \begin{tabular}{lr}
 \toprule
-Statistic & Value \\
-\midrule
-Entities (indexed) & 93{,}773 \\
-Relations & 51 \\
-Train triples & 4{,}762{,}676 \\
-Duplicates / self-loops removed & 2 \\
-Degree min / median / mean & 1 / 22 / 101.6 \\
-Degree P99 / max & 1{,}279 / 62{,}733 \\
-Relation categories & 51 N--N \\
-Message-passing relations (with inverse) & 102 \\
-IDs are integers & yes \\
-\bottomrule
-\end{tabular}
-\caption{Spark graph statistics on \texttt{ogbl-biokg} after cleaning and dense
-indexing. Every number is a Spark aggregation, not a pandas scan of the GPU
-tensors.}
-\label{tab:spark}
-\end{table}
+Head occurrence degree & Diagnostic \\ \midrule
+1 to 136 & 0.4012 \\
+Above 136 to 741 & 0.4993 \\
+Above 741 to 5,551 & 0.5679 \\
+Above 5,551 to 62,733 & 0.5486 \\
+\bottomrule\end{tabular}
+\caption{Saved reciprocal-mean-rank diagnostic by query-head degree. These values are not standard MRR.}\end{table}
+The diagnostic increases from 0.4012 in the lowest-degree group to 0.4993 and then 0.5679, before decreasing to 0.5486 in the highest-degree group. Less-connected heads remain the weakest group, but the relationship is not strictly increasing. Relation composition and entity type may differ between groups. Standard per-group MRR requires the separate directional ranks; those ranks are not present in the exported aggregate JSON, so corrected values cannot be reconstructed from it.
 
-Figure~\ref{fig:degree} shows the log-log degree distribution. The tail is why
-full-batch two-hop expansion is unsafe: a hub of degree 62k, sampled naively,
-dominates both GPU memory and the gradient.
+\subsection*{8.3 Correlation and embedding visualisation}
+Correlation obtains the lowest MRR in both tables and zero Hits@10. Its OGB MRR, 0.003984, is approximately 1/251, consistent with all 501 candidates tying under the evaluator's averaged tie rank (Open Graph Benchmark, evaluator source). This is a diagnostic clue, not proof of constant scores, because raw scores are absent. Its local MR of 485.13 is also consistent with extensive ties under pessimistic ranking after filtering. A rerun should inspect score variance, finite values and checkpoint selection before interpreting this as an ordinary weak model.
 
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{fig_degree_loglog.png}
-\caption{Entity degree distribution on a log-log scale after Spark aggregation.
-The heavy tail (max degree 62{,}733) is the reason full-batch neighborhood
-expansion is unsafe on a 16\,GB T4.}
-\label{fig:degree}
-\end{figure}
+The repository also includes a two-dimensional projection of base entity embeddings using UMAP or a t-SNE fallback. It is useful as a visual inspection of embedding structure, but the scatter plot has no entity-type colouring or quantitative cluster evaluation. Apparent groups therefore cannot establish that the model recovered biomedical types. That claim would require labels and a separate analysis.
 
-\section{PySpark Pipeline Design}
+\section*{9 Spark Timing and Scalability}
+\subsection*{9.1 Operations that were timed}
+The Spark experiment has two parts. The fraction sweep runs a count, an average-degree aggregation and a relation-group count on 10, 25, 50 and 100 percent of the training DataFrame. The partition sweep times repartitioning followed by a relation-group count. These are different workloads; the partition timings do not include the degree calculation used in the fraction sweep.
 
-We run Spark 3.5 in \texttt{local[*]} with Arrow enabled, Kryo serialization,
-and a driver budget of 12\,GB on the T4 image so the subsequent PyTorch process
-is not starved. Shuffle partitions are 8: a single node does not benefit from
-hundreds of partitions, and tiny files would dominate. The session is
-\textbf{stopped before GPU training}.
-
-\paragraph{Stages.}
-(1)~Ingest triples with an explicit $(h,r,t)$ schema via
-\texttt{spark.createDataFrame} (Spark ignores \texttt{\_}-prefixed paths, so
-underscore-named Parquet dumps never become the source of truth).
-(2)~Drop nulls, empty strings, exact-duplicate triples, and self-loops.
-(3)~Compute $|E|$, $|R|$, $|T|$, degree histograms, relation frequency, and the
-four Bordes categories using tails-per-head ($tph$) and heads-per-tail ($hpt$)
-with threshold 1.5.
-(4)~For \texttt{wikidata5m\_subset}: keep entities with degree $\ge$
-\texttt{min\_degree}, take the top-$K$ by degree, then iterate $k$-core until
-the vertex set is closed.
-(5)~Dense 0-based ids. On \texttt{ogbl-biokg} we preserve OGB's type-aware
-global integers rather than hashing strings.
-(6)~Discard valid/test triples whose endpoints are unseen in train.
-(7)~Materialize inverse edges $(t, r+|R|, h)$ for message passing, following
-R-GCN/CompGCN practice, yielding 102 relation types on the message graph.
-(8)~\texttt{groupBy}/\texttt{collect\_set} to build true-tail sets for $(h,r)$
-and true-head sets for $(t,r)$.
-(9)~Hand tensors to PyTorch and call \texttt{spark.stop()}.
-
-This plan is the Big Data part of the work: every statistic in
-Section~\ref{sec:sparkscale} is a Spark aggregation, and the GPU never sees raw
-Wikidata strings. Scalability is measured by repeating count + degree +
-relation-frequency on 10/25/50/100\% samples of the training triples, and by
-varying the partition count on the full graph (Figure~\ref{fig:spark},
-Table~\ref{tab:sparkscale}).
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{fig_spark_scale.png}
-\caption{Spark runtime versus sampled fraction of training triples (left) and
-versus partition count on the full graph (right), single Kaggle node. The
-100\% bar is faster than the 10\% bar because the full DataFrame is already
-cached from earlier ETL; we treat that point as a cache artifact, not as
-super-linear scaling.}
-\label{fig:spark}
-\end{figure}
-
-\section{Model Architecture}
-
-\subsection{R-GCN encoder}
-
-Let $\mathcal{N}_r(i)$ be the neighbors of entity $i$ under relation $r$ and
-$c_{i,r}$ a normalization constant (neighborhood degree). R-GCN updates
-\citep{schlichtkrull2018modeling} are
-\begin{equation}
-\begin{aligned}
-h_i^{(\ell+1)} = \sigma\Big(
-&\textstyle\sum_{r}\sum_{j\in\mathcal{N}_r(i)}
-\tfrac{1}{c_{i,r}} W_r^{(\ell)} h_j^{(\ell)} \\
-&+ W_0^{(\ell)} h_i^{(\ell)}\Big).
-\end{aligned}
-\label{eq:rgcn}
-\end{equation}
-Basis decomposition shares $B$ matrices $\{V_b\}$ across relations,
-$W_r = \sum_{b=1}^{B} a_{rb} V_b$, cutting the parameter count from
-$O(|R|d^2)$ to $O(|R|B + B d^2)$. We use PyG \texttt{RGCNConv} with $B{=}8$
-and two layers. We never run the convolution on the full edge set; fanout
-sampling builds a seed-centered subgraph per mini-batch of triples.
-
-\subsection{CompGCN encoder}
-
-CompGCN \citep{vashishth2020composition} composes the neighbor entity with the
-relation before the linear map:
-\begin{equation}
-h_v^{(\ell+1)} =
-f\!\left(
-\sum_{(u,r)\in\mathcal{N}(v)}
-W_{\lambda(r)}\,\phi\!\big(h_u^{(\ell)}, h_r^{(\ell)}\big)
-\right),
-\label{eq:compgcn}
-\end{equation}
-where $\lambda(r)\in\{\mathrm{in},\mathrm{out},\mathrm{loop}\}$ selects a
-direction-specific matrix. The three operators we compare are
-\begin{align}
-\phi_{\mathrm{sub}}(h,r) &= h-r, \label{eq:ops} \\
-\phi_{\mathrm{mult}}(h,r) &= h \odot r, \nonumber \\
-\phi_{\mathrm{corr}}(h,r) &= h \star r. \nonumber
-\end{align}
-Circular correlation $\star$ is implemented with a real FFT:
-$\mathrm{irfft}(\overline{\mathrm{rfft}(h)}\odot\mathrm{rfft}(r))$. Relation
-embeddings are updated by a dedicated $W_{\mathrm{rel}}$ at each layer.
-Aggregation uses \texttt{index\_add\_} in the message dtype so mixed-precision
-\texttt{float16} and \texttt{float32} weights do not crash; that bug appeared
-on the first T4 CompGCN run and is now patched.
-
-\subsection{Decoder, query-side GNN, and loss}
-
-DistMult \citep{yang2015embedding} scores
-\begin{equation}
-f(h,r,t)=\langle h,r,t\rangle=\sum_{k} h_k\,r_k\,t_k.
-\label{eq:distmult}
-\end{equation}
-A full-graph GNN encoding of all 93{,}773 entities at every step does not fit
-the training loop once neighborhoods are expanded. We therefore encode
-\textbf{only the query side} with sampled message passing and score every
-candidate (true tail/head and negatives) from the global entity table
-\texttt{model.ent}. Training uses $k$ negatives drawn uniformly over entities
-and binary cross-entropy with logits, with label smoothing $0.1$. Mixed
-precision, gradient clipping at 1.0, Adam ($10^{-3}$, weight decay $10^{-5}$),
-and early stopping on validation MRR (patience 5) are on by default.
-Checkpoints are the best validation snapshot, not the last epoch.
-
-This decoder choice is deliberate and has consequences in Section~\ref{sec:results}:
-the GNN never contextualizes the candidate, so it cannot implement a fully
-relational ``both-arguments-are-graphs'' scorer. It \emph{can} still move the
-query embedding into a neighborhood-aware region of DistMult space, which is
-exactly what type-constrained OGB negatives reward.
-
-\section{Experimental Setup}
-
-\paragraph{Hardware.}
-Kaggle Tesla T4 (15.6 GB VRAM), preset \texttt{kaggle\_t4}.
-\texttt{QUICK\_RUN=False}, \texttt{TIME\_BUDGET=fast}, seed 42. Peak allocated
-CUDA memory during GNN steps stayed well below 16\,GB after the AMP dtype fix.
-
-\paragraph{Optimization budget (not the same for every model).}
-DistMult is cheap, so it was given a stronger budget than the GNNs: 20 epochs
-$\times$ 1{,}500 steps, 32 negatives. R-GCN and each CompGCN operator ran 8
-epochs $\times$ 400 steps, 16 negatives, batch size 1{,}024, fanout $[10,10]$,
-dimension 128, 2 layers, 8 R-GCN bases. That is an intentional baseline-first
-design, not a matched FLOP comparison. Evaluation ranks 8{,}000 test triples
-in both head and tail directions.
-
-\paragraph{Two protocols.}
-\textit{Unconstrained candidates.} Rank the true entity among 500 random
-entities plus itself, masking other true tails/heads from the Spark lookup
-table (``filtered-candidates head+tail''). This is what Table~\ref{tab:main}
-reports.
-\textit{Official OGB.} Call \texttt{ogb.linkproppred.Evaluator} on
-\texttt{ogbl-biokg} with the dataset's type-constrained negative lists
-(Table~\ref{tab:ogb}). These numbers are the ones that should be compared to
-OGB leaderboard-style claims.
-
-\paragraph{Software.}
-PySpark 3.5, PyTorch from the Kaggle GPU image, PyTorch Geometric, \texttt{ogb}.
-PyG was chosen over DGL because \texttt{RGCNConv} and OGB examples align, and
-DGL's CUDA wheels are easier to mismatch on Kaggle. Internet is required only
-for the first install and the OGB download.
-
-Figure~\ref{fig:curves} shows training loss and validation MRR. DistMult is
-optimized for many more steps; GNN curves are shorter and noisier, which is
-expected from 400-step epochs on a 4.76M-triple graph.
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{fig_train_curves.png}
-\caption{Training loss (left) and validation MRR (right) for DistMult, R-GCN,
-and CompGCN. DistMult ran 20 epochs $\times$ 1{,}500 steps; GNN encoders ran
-8 epochs $\times$ 400 steps. The DistMult validation curve is therefore not a
-matched-compute comparison.}
-\label{fig:curves}
-\end{figure}
-
-\section{Results and Discussion}
-\label{sec:results}
-
-Table~\ref{tab:main} reports unconstrained filtered-candidate ranking on 8{,}000
-test triples. DistMult is the strongest model on this protocol
-(MRR $0.469$, Hits@10 $0.619$, mean rank $28.7$). CompGCN-mult is the best
-compositional GNN (MRR $0.352$, Hits@10 $0.604$). R-GCN sits between them on
-Hits@10 but below DistMult on MRR, because its Hits@1 is only $0.169$ against
-DistMult's $0.329$. CompGCN-sub is weaker still. CompGCN-corr is a failed run
-(MRR $0.002$, Hits@10 $0$, mean rank $497$): mixed-precision FFTs produced
-numerically useless representations, and the official OGB evaluator was not
-applied to that checkpoint.
-
-\begin{table}[t]
-\centering
-\small
-\setlength{\tabcolsep}{3.5pt}
-\begin{tabular}{lccccc}
-\toprule
-Model & MRR & H@1 & H@3 & H@10 & MR \\
-\midrule
-DistMult & \textbf{0.469} & \textbf{0.329} & \textbf{0.527} & \textbf{0.619} & \textbf{28.7} \\
-R-GCN & 0.367 & 0.169 & 0.490 & 0.557 & 58.2 \\
-CompGCN-sub & 0.309 & 0.100 & 0.464 & 0.517 & 57.0 \\
-CompGCN-mult & 0.352 & 0.117 & 0.512 & 0.604 & 44.0 \\
-CompGCN-corr & 0.002 & 0.000 & 0.000 & 0.000 & 497.2 \\
-\bottomrule
-\end{tabular}
-\caption{Unconstrained filtered-candidate ranking on \texttt{ogbl-biokg}
-(8{,}000 test triples, 500 candidates, head and tail, Spark true-triple mask).
-This is \emph{not} the OGB leaderboard protocol. CompGCN-corr collapsed under
-AMP+FFT and should be read as an engineering failure, not as evidence that
-circular correlation is an intrinsically weak operator.}
-\label{tab:main}
-\end{table}
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{fig_main_bars.png}
-\caption{MRR and Hits@10 under unconstrained 500-candidate ranking. DistMult
-leads this protocol; CompGCN-mult is the strongest GNN on Hits@10.}
-\label{fig:bars}
-\end{figure}
-
-Table~\ref{tab:ogb} is the protocol that matches published OGB numbers.
-Here the ranking \textbf{reverses}. R-GCN reaches MRR $0.704$ and Hits@10
-$0.817$; CompGCN-mult is essentially tied on MRR ($0.699$) and slightly ahead
-on Hits@10 ($0.843$). DistMult drops to MRR $0.550$. Type-constrained
-negatives are other entities of the same biomedical type (drug, disease,
-protein, \ldots). A neighborhood-aware query embedding helps exactly in that
-setting, because many wrong same-type candidates are locally implausible.
-Unconstrained candidates include easy type-mismatched entities that a bilinear
-model already scores near the bottom, which inflates DistMult's Hits@1 in
-Table~\ref{tab:main}.
-
-\begin{table}[t]
-\centering
-\small
-\setlength{\tabcolsep}{3.5pt}
-\begin{tabular}{lcccc}
-\toprule
-Model & MRR & H@1 & H@3 & H@10 \\
-\midrule
-DistMult & 0.550 & 0.510 & 0.562 & 0.625 \\
-R-GCN & \textbf{0.704} & \textbf{0.653} & \textbf{0.716} & 0.817 \\
-CompGCN-sub & 0.621 & 0.566 & 0.636 & 0.741 \\
-CompGCN-mult & 0.699 & 0.639 & 0.714 & \textbf{0.843} \\
-\bottomrule
-\end{tabular}
-\caption{Official OGB \texttt{ogbl-biokg} evaluator (type-constrained negative
-lists). R-GCN is best on MRR; CompGCN-mult is best on Hits@10. CompGCN-corr is
-omitted (checkpoint unusable). These are the numbers to cite if a single
-``test score'' is required.}
-\label{tab:ogb}
-\end{table}
-
-\paragraph{Why DistMult can still win Table~\ref{tab:main}.}
-Three design choices stack in DistMult's favor on unconstrained ranking.
-(1)~Compute: 30{,}000 DistMult update steps versus 3{,}200 GNN steps.
-(2)~Scoring: candidates are read from \texttt{model.ent}, so a GNN that only
-moves the query vector is a weaker inductive bias unless the negative set is
-hard.
-(3)~Sampling: fanout $[10,10]$ under-represents 2-hop biomedical paths around
-hubs. None of these is an excuse to hide Table~\ref{tab:ogb}, where the GNN
-encoders do what they are supposed to do.
-
-\paragraph{Composition operators.}
-Multiplication is the robust CompGCN default, matching the original paper's
-practical advice \citep{vashishth2020composition}. Subtraction is consistently
-a few points behind on both protocols. Correlation was not given a fair
-float32 re-run after the AMP crash; we do not claim $\phi_{\mathrm{corr}}$ is
-worse than $\phi_{\mathrm{mult}}$ in general.
-
-\paragraph{Ablations.}
-A sweep over dimension, depth, basis count, and negatives was implemented but not executed
-(\texttt{RUN\_ABLATIONS=False}) so the session finished inside the T4 budget.
-We therefore do not invent those rows. The main controlled variables that
-\emph{were} run are the encoder family and the CompGCN operator.
-
-\paragraph{Error analysis.}
-Figure~\ref{fig:relcat} is degenerate: Spark labeled every relation N--N, so
-there is a single bar at DistMult MRR $0.469$. That is a property of
-\texttt{ogbl-biokg} under the 1.5 $tph$/$hpt$ cutoff, not a plotting bug.
-Figure~\ref{fig:degree-mrr} is the informative slice. DistMult MRR by
-head-degree quartile is $0.035$ (degree $\le 121$), $0.218$ ($121$--$1{,}583$),
-$0.777$ ($1{,}583$--$8{,}071$), and $0.846$ ($>8{,}071$). Rare entities are
-the failure mode. GNN sampling cannot fix a tail entity that almost never
-appears as a seed; if anything, hub-dominated neighborhoods make the long tail
-harder. Figure~\ref{fig:umap} shows a 2D projection of a subsample of entity
-embeddings: type structure is visible as loose clusters, which is consistent
-with OGB's type-constrained negatives being the protocol where GNNs pull ahead.
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{fig_mrr_by_relcat.png}
-\caption{MRR by Bordes relation category for the best unconstrained model
-(DistMult). All 51 \texttt{ogbl-biokg} relations are N--N at threshold 1.5, so
-the plot has one bar. The degree breakdown in Figure~\ref{fig:degree-mrr} is
-the actual error analysis.}
-\label{fig:relcat}
-\end{figure}
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{fig_mrr_by_degree.png}
-\caption{DistMult MRR by head-entity degree quartile. Low-degree entities
-(MRR $0.035$) are more than twenty times harder than the hub quartile
-(MRR $0.846$). This is the dominant error mode on \texttt{ogbl-biokg}.}
-\label{fig:degree-mrr}
-\end{figure}
-
-\begin{figure}[t]
-\centering
-\includegraphics[width=\columnwidth]{fig_umap_entities.png}
-\caption{UMAP of a subsample of trained entity embeddings. Loose clusters are
-consistent with biomedical entity types (drug, protein, disease, side effect,
-protein function) occupying different regions of DistMult space.}
-\label{fig:umap}
-\end{figure}
-
-\section{Scalability Analysis}
-\label{sec:sparkscale}
-
-Table~\ref{tab:sparkscale} is the evidence that the ETL is a Spark job rather
-than a single-core loop. On one Kaggle node, profiling 10--50\% of the 4.76M
-triples takes about 1.7--2.3\,s. The 100\% point is \emph{faster} (0.72\,s)
-because that DataFrame is already cached from the main ETL; we do not interpret
-it as super-linear scaling. Partition scaling on the full graph is similarly
-flat (1.26--1.62\,s from 2 to 16 partitions): eight vCPUs saturate quickly, and
-task-launch overhead dominates any further split. Both effects are expected
-for \texttt{local[*]} on a few million rows and are reported honestly.
-
-\begin{table}[t]
-\centering
-\small
+\begin{table}[t]\centering\small
+\setlength{\tabcolsep}{3pt}
 \begin{tabular}{lrr}
 \toprule
-Setting & Approx.\ triples & Seconds \\
-\midrule
-10\% of train & 476k & 1.84 \\
-25\% of train & 1.19M & 1.69 \\
-50\% of train & 2.38M & 2.32 \\
-100\% of train (cached) & 4.76M & 0.72 \\
-\midrule
-2 partitions & 4.76M & 1.62 \\
-4 partitions & 4.76M & 1.26 \\
-8 partitions & 4.76M & 1.44 \\
-16 partitions & 4.76M & 1.27 \\
-\bottomrule
-\end{tabular}
-\caption{Spark job time (count + degree + relation frequency) on a single
-Kaggle node. The 100\%-fraction row is a cache hit from the preceding ETL, not
-a claim that more data is faster.}
-\label{tab:sparkscale}
-\end{table}
+Setting & Approx. rows & Seconds \\ \midrule
+10\% fraction & 476,267 & 1.77 \\
+25\% fraction & 1,190,669 & 2.22 \\
+50\% fraction & 2,381,338 & 2.05 \\
+100\% fraction & 4,762,676 & 0.69 \\
+2 partitions & 4,762,676 & 1.65 \\
+4 partitions & 4,762,676 & 1.28 \\
+8 partitions & 4,762,676 & 1.22 \\
+16 partitions & 4,762,676 & 1.28 \\
+\bottomrule\end{tabular}
+\caption{Single-run local Spark timings. Fraction and partition sweeps time different workloads.}\end{table}
+The approximate row counts for sampled fractions are calculated as the full count multiplied by the fraction. They are not saved realised sample counts. The 100-percent DataFrame has already been cached and used earlier, while smaller fractions add sampling work. Spark can also reuse or optimise existing plans. These conditions make the sweep unsuitable for inferring a clean linear relationship between input size and runtime.
 
-\paragraph{GPU scaling.}
-Full-batch R-GCN on Wikidata5M is out of scope by construction. Mini-batch
-fanout is the real knob: each extra hop multiplies sampled degree, and
-biomedical hubs make 2-hop expansion the first OOM source on a 6\,GB 4050. The
-notebook halves batch size and fanout on \texttt{OutOfMemoryError}. Mixed
-precision is enabled on CUDA; CompGCN aggregation tensors are allocated in the
-message dtype so \texttt{index\_add\_} does not mix Half and Float. Spark is
-stopped before training; leaving the JVM alive is the second most common way
-to lose the Kaggle RAM budget. The T4 preset (dim 128, batch 1{,}024, fanout
-10) ran without hitting that fallback.
+\subsection*{9.2 Reading the observed times}
+The full-data point takes 0.69 seconds, less than the 1.77 seconds for the 10-percent sample. This does not mean that processing more data is inherently faster. It reflects a timing experiment in which cache state and query work differ. Nor does it mean that complete ingestion, cleaning, indexing, Parquet writing and tensor preparation finish in under a second. Those stages are outside the timed operation group.
 
-\section{Conclusion and Future Work}
+The partition experiment ranges from about 1.22 to 1.65 seconds, with eight partitions the fastest observed setting. There is one measurement per setting and no estimate of normal run-to-run variation. The data do not establish a best partition count or demonstrate saturation of a specific CPU configuration. They show that these small local workloads have similar observed times under the tested partition choices.
 
-Large-scale knowledge graph completion on coursework hardware is a two-system
-problem: Spark for relational ETL, and neighbor-sampled R-GCN/CompGCN for
-learning on the largest OGB graph that actually fits a T4. DistMult is the
-controlled decoder; basis decomposition and composition operators are the
-variables. On unconstrained 500-candidate ranking DistMult is strongest
-(MRR $0.469$). On the official OGB evaluator R-GCN is strongest
-(MRR $0.704$) and CompGCN-mult is close, with the best Hits@10 ($0.843$).
-CompGCN-corr failed numerically under AMP. Low-degree entities, not relation
-category, are the error mode that remains.
+\subsection*{9.3 A stronger follow-up experiment}
+A more informative study would measure the same operation at every setting, record actual row counts and separate cold-cache from warm-cache trials. Several repetitions should be run in a varied order and summarised with medians and spread. End-to-end ETL time, shuffle volume, peak host memory and task counts would help explain where resources are spent.
 
-Future work includes a matched-compute DistMult/GNN comparison, float32
-CompGCN-corr, self-adversarial negative sampling, encoding both query and
-candidate, a ConvE decoder under the same encoder, and moving the Spark stage
-from \texttt{local[*]} to a real cluster if a course-provided YARN or
-Kubernetes endpoint exists.
+For cluster scalability, the number of workers would need to vary while the dataset and operations remain controlled. The current local-mode results do not answer that question. They still document that Spark is integrated into the preparation pipeline, but the scope of the scalability claim should remain limited to a small single-machine timing study.
+
+\section*{10 Reproducibility and Project Organisation}
+The main executable artifact is notebooks/final.ipynb, a Kaggle-ready copy of notebooks/kg\_completion\_rgcn\_compgcn.ipynb with the long-run setting selected and the completed run's cell outputs retained. The two notebooks share the same 81-cell structure; their executable Python differs in the budget selection: final.ipynb sets TIME\_BUDGET to long, while the general-purpose notebook defaults to fast. The final notebook's outputs document the Tesla T4 run, Spark preparation, training, OGB evaluation and artifact export. The files under src provide readable module mirrors, but the notebooks are self-contained. requirements.txt lists dependencies, while report/figures holds the exported charts and the report directory holds the written analysis.
+
+The checked-in final.ipynb records the long BioKG run used in this report. To repeat it from scratch, verify the data source, choose BioKG, disable QUICK\_RUN, set TIME\_BUDGET to long and use the recorded T4 configuration. To test a new setup first, use QUICK\_RUN and confirm that real benchmark data were loaded. Some non-BioKG loaders have a synthetic fallback for execution checks. The general-purpose notebook's fast default does not reproduce the exported long-run schedule or evaluation size.
+
+For a fresh comparison, use a new output directory or disable resume after retaining previous artifacts. The current resume tag does not encode every training and evaluation option. Reusing an output directory after changing an omitted option can therefore mix incompatible saved results. Keeping a full configuration hash, notebook revision and dataset version with each run would make this safer.
+
+After training, retain checkpoints, histories, results.json, both result CSV files, the ablation export and Spark timings together. The final report tables should be generated from those records rather than copied from a chart by eye. Check that all seven model rows are present, that the official evaluator used original OGB ordering, and that no skipped or failed model has been silently omitted from the comparison.
+
+A full rerun is still necessary to verify the reported numerical results independently. The repository provides aggregate outputs, but not every per-query score and training event needed to reconstruct them without execution. The present analysis checks internal agreement of the saved tables and consistency with the notebook; it does not treat that check as a new training experiment.
+
+\section*{11 Conclusion}
+The project demonstrates a complete workflow for preparing a relational graph with Spark and training sampled graph encoders on one GPU. In the recorded long BioKG run, CompGCN multiplication has the strongest ranking performance, with local MRR 0.6307 and OGB MRR 0.6201. Subtraction follows under both procedures, while R-GCN improves substantially over shallow DistMult. Multiplication also has a lower recorded training-loop time than R-GCN in this implementation.
+
+The results support using neighbourhood information within the tested update schedule. They do not establish a universal ordering of architectures, and they do not show that equal steps are equal computation. Head prediction remains weaker than tail prediction. The shorter R-GCN sweep suggests useful lower-cost settings, but repeated seeds are needed before turning those observations into firm recommendations.
+
+The next priorities are to preserve directional ranks for correct group metrics, evaluate several seeds, compare models under both equal-update and equal-time budgets, and repeat Spark timings with controlled cache state. These changes would strengthen the evidence without changing the central aim of the project: understanding when graph structure improves missing-link ranking under practical resource limits.
 
 \section*{Limitations}
+The study covers one dataset and one recorded seed. No uncertainty intervals or repeated-run summaries are available. The local test uses a prefix of the prepared test array, and both test procedures use sampled negatives rather than exhaustive ranking over all entities. Their numerical values should therefore remain attached to their stated protocols.
 
-Training is transductive and English/Wikidata-centric; we do not evaluate
-multilingual or biomedical downstream tasks beyond \texttt{ogbl-biokg} link
-prediction. Candidate ranking with 500 negatives is not equivalent to full
-filtered ranking over 90k entities and inflates Hits@$k$; the OGB evaluator is
-the fairer protocol and is reported separately. Neighbor sampling with fanout
-$[10,10]$ under-represents long-range relational paths. DistMult was trained
-for an order of magnitude more steps than the GNNs, so Table~\ref{tab:main} is
-not a matched-FLOP study. Query-side GNN scoring never contextualizes the
-candidate. CompGCN-corr was not re-run in float32 after the AMP failure.
-Ablations of dimension, depth, bases, and negative count were not executed.
-Spark runs on one node: Table~\ref{tab:sparkscale} measures data-size scaling
-of a local plan, not a multi-executor cluster. Wikidata5M subset training was
-implemented but not the source of these tables.
+The encoder contextualises only the known query entity, and neighbour sampling omits part of the surrounding graph. Checkpoint selection uses tail-only validation. The type-aware corruption helper also replaces an accidental true-entity draw with the next global identifier; at an entity-type boundary, that replacement can leave the intended type pool. It does not filter all other true triples during training. These implementation details should be addressed in future evaluation and sampling checks.
+
+The degree diagnostic is not standard MRR, and its corrected values cannot be recovered from aggregate results. Correlation's weak performance is specific to the implemented settings. The Spark measurements do not establish cluster scalability or end-to-end throughput. Peak GPU memory and a complete software-version record are not included in results.json, so no precise memory-efficiency claim is made.
 
 \section*{Ethics Statement}
+The benchmark contains biomedical relationships, but a high link score is not evidence that a drug interaction or biological claim is clinically valid. Predictions would require domain review and independent validation before any practical use. Missing facts and uneven coverage can also bias ranking towards well-connected entities. The project uses benchmark data and reports model behaviour without presenting inferred links as confirmed biomedical discoveries.
 
-\texttt{ogbl-biokg} contains biomedical entity types; link-prediction scores
-must not be read as clinical evidence. Wikidata5M inherits Wikidata's coverage
-and notability biases. We do not release private data. All reported digits
-come from the executed Kaggle notebook's \texttt{results.json}; smoke-test
-metrics from a one-epoch debug run are not used.
+\section*{References}
+Antoine Bordes, Nicolas Usunier, Alberto Garcia-Duran, Jason Weston, and Oksana Yakhnenko. 2013. Translating embeddings for modeling multi-relational data. Advances in Neural Information Processing Systems.
 
-\section*{Acknowledgments}
+Matthias Fey and Jan E. Lenssen. 2019. Fast graph representation learning with PyTorch Geometric. ICLR Workshop on Representation Learning on Graphs and Manifolds. arXiv:1903.02428.
 
-This report follows the ACL 2023 proceedings format (A4, two-column, Times,
-author--year citations, and a mandatory Limitations section). Experiments ran
-on a Kaggle Tesla T4. Source code is in the public GitHub repository named
-after this project's title.
+William L. Hamilton, Rex Ying, and Jure Leskovec. 2017. Inductive representation learning on large graphs. Advances in Neural Information Processing Systems.
 
-\bibliography{custom}
+Weihua Hu, Matthias Fey, Marinka Zitnik, Yuxiao Dong, Hongyu Ren, Bowen Liu, Michele Catasta, and Jure Leskovec. 2020. Open Graph Benchmark: Datasets for machine learning on graphs. Advances in Neural Information Processing Systems.
 
-\appendix
-\section{Hyperparameters and paths}
-\label{app:hyper}
+Open Graph Benchmark. n.d. Link property prediction documentation, ogbl-biokg. https://ogb.stanford.edu/docs/linkprop/ Accessed 7 November 2026.
 
-\begin{table}[h]
-\centering
-\small
-\begin{tabular}{lr}
-\toprule
-Setting & T4 value used \\
-\midrule
-GPU & Tesla T4, 15.6\,GB \\
-Dataset & \texttt{ogbl-biokg} \\
-\texttt{QUICK\_RUN} / budget & False / \texttt{fast} \\
-Embedding dim & 128 \\
-GNN layers / R-GCN bases & 2 / 8 \\
-Batch size & 1{,}024 \\
-Fanout & $[10, 10]$ \\
-GNN negatives / steps $\times$ epochs & 16 / $400\times 8$ \\
-DistMult negatives / steps $\times$ epochs & 32 / $1{,}500\times 20$ \\
-Label smoothing / dropout & 0.1 / 0.2 \\
-Adam lr / weight decay / clip & $10^{-3}$ / $10^{-5}$ / 1.0 \\
-Eval triples / candidates & 8{,}000 / 500 \\
-Spark driver / partitions & 12\,g / 8 \\
-\bottomrule
-\end{tabular}
-\caption{Hyperparameters of the reported T4 run. An RTX 4050 preset exists in
-the same notebook (dim 64, batch 256, fanout $[8,8]$, CompGCN-mult only) but
-was not the source of these tables.}
-\label{tab:hyper}
-\end{table}
+Open Graph Benchmark. n.d. Evaluator source, linkproppred/evaluate.py. https://github.com/snap-stanford/ogb/blob/master/ogb/linkproppred/evaluate.py Accessed 7 November 2026.
 
-Kaggle: Accelerator = GPU T4, Internet on for the first install and OGB
-download. Outputs land under \texttt{/kaggle/working/outputs} and
-\texttt{/kaggle/working/figures}. Figures in this PDF are those files,
-copied into \texttt{report/figures/}. Length target is 8--10 pages including
-figures and references (assignment rule); ACL 2023 geometry is preserved.
+Michael Schlichtkrull, Thomas N. Kipf, Peter Bloem, Rianne van den Berg, Ivan Titov, and Max Welling. 2018. Modeling relational data with graph convolutional networks. The Semantic Web, ESWC. https://arxiv.org/abs/1703.06103
+
+Zhiqing Sun, Zhi-Hong Deng, Jian-Yun Nie, and Jian Tang. 2019. RotatE: Knowledge graph embedding by relational rotation in complex space. International Conference on Learning Representations.
+
+Theo Trouillon, Johannes Welbl, Sebastian Riedel, Eric Gaussier, and Guillaume Bouchard. 2016. Complex embeddings for simple link prediction. Proceedings of the 33rd International Conference on Machine Learning.
+
+Shikhar Vashishth, Soumya Sanyal, Vikram Nitin, and Partha Talukdar. 2020. Composition-based multi-relational graph convolutional networks. International Conference on Learning Representations. https://arxiv.org/abs/1911.03082
+
+Bishan Yang, Wen-tau Yih, Xiaodong He, Jianfeng Gao, and Li Deng. 2015. Embedding entities and relations for learning and inference in knowledge bases. International Conference on Learning Representations.
+
+Matei Zaharia, Reynold S. Xin, Patrick Wendell, Tathagata Das, Michael Armbrust, Ankur Dave, Xiangrui Meng, Josh Rosen, Shivaram Venkataraman, Michael J. Franklin, Ali Ghodsi, Joseph Gonzalez, Scott Shenker, and Ion Stoica. 2016. Apache Spark: A unified engine for big data processing. Communications of the ACM, 59(11):56-65.
 
 \end{document}
