@@ -10,7 +10,7 @@
 \begin{document}
 \maketitle
 \begin{abstract}
-Knowledge graphs store facts as relationships between entities, but many useful relationships are missing. This project investigates whether information from neighbouring entities improves missing-link prediction when training must fit on a single GPU. We combine a PySpark preparation pipeline with R-GCN and three CompGCN variants, using DistMult as their scoring function. The experiments use the biomedical ogbl-biokg dataset and compare these graph models with shallow DistMult, TransE and ComplEx models. In the saved run, CompGCN with multiplication achieves the highest MRR: 0.5256 in the local sampled-candidate test and 0.5127 with the OGB evaluator. R-GCN obtains 0.4552 and 0.4013, respectively. These results favour neighbourhood information under the configured training schedule, although they represent one seed rather than a statistically established model ranking. The report explains the data pipeline, model implementation, evaluation protocols and recorded results. It also identifies limitations in the degree-based diagnostic and Spark timing experiment so that their values are not confused with standard MRR or end-to-end processing time.
+Knowledge graphs store facts as relationships between entities, but many useful relationships are missing. This project investigates whether information from neighbouring entities improves missing-link prediction when training must fit on a single GPU. We combine a PySpark preparation pipeline with R-GCN and three CompGCN variants, using DistMult as their scoring function. The experiments use the biomedical ogbl-biokg dataset and compare these graph models with shallow DistMult, TransE and ComplEx models. In the saved run, CompGCN with multiplication achieves the highest MRR: 0.6307 in the local sampled-candidate test and 0.6201 with the OGB evaluator. R-GCN obtains 0.5490 and 0.5472, respectively. These results favour neighbourhood information under the configured training schedule, although they represent one seed rather than a statistically established model ranking. The report explains the data pipeline, model implementation, evaluation protocols and recorded results. It also identifies limitations in the degree-based diagnostic and Spark timing experiment so that their values are not confused with standard MRR or end-to-end processing time.
 
 \end{abstract}
 \section*{1 Introduction}
@@ -142,16 +142,16 @@ Each optimisation step includes both head and tail prediction. The training batc
 
 The loss averages the head and tail objectives. Adam uses a learning rate of 0.001 and weight decay of 0.00001, with gradient clipping at 1.0. Dropout is 0.2 between graph layers. Although a label-smoothing constant appears in the configuration, the active self-adversarial loss does not use it; smoothing applies only to the alternative binary cross-entropy path. It should therefore not be listed as an active feature of this run.
 
-Each configured epoch samples 400 batches with replacement rather than making a complete pass through the training graph. Eight such epochs allow at most 3,200 updates and 1,638,400 sampled triple presentations per model before early stopping or skipped batches. This is fewer presentations than the number of training triples, and repeated samples reduce distinct coverage further. The word epoch in this notebook therefore denotes a fixed training interval, not full-dataset coverage.
+Each configured epoch samples 600 batches with replacement rather than making a complete pass through the training graph. Twelve such epochs allow at most 7,200 updates and 3,686,400 sampled triple presentations per model before early stopping or skipped batches. This is fewer presentations than the number of training triples, and repeated samples reduce distinct coverage further. The word epoch in this notebook therefore denotes a fixed training interval, not full-dataset coverage.
 
 \subsection*{5.5 Checkpoints and practical safeguards}
-Validation selects the best checkpoint using tail-only sampled MRR. The current notebook uses up to 800 validation triples and 100 sampled negatives per query, with patience five. This validation procedure is smaller than the final test and does not use the official OGB score for checkpoint selection. Selecting on tail performance may also matter when head and tail results differ substantially.
+Validation selects the best checkpoint using tail-only sampled MRR. The long-run preset uses up to 2,000 validation triples and 100 sampled negatives per query, with patience five. This validation procedure is smaller than the final test and does not use the official OGB score for checkpoint selection. Selecting on tail performance may also matter when head and tail results differ substantially.
 
 The training loop skips non-finite losses and attempts to reduce batch size and fanout after a GPU out-of-memory error. It also saves partial results and model checkpoints so an interrupted session can resume. These safeguards improve usability, but successful-step counts and any changed sampling settings should be recorded when comparing runs. Equal configured schedules do not necessarily imply equal numbers of completed updates.
 
 \section*{6 Experimental Setup and Metrics}
 \subsection*{6.1 Recorded configuration}
-The saved run identifies a Tesla T4 with approximately 15.6 GB of memory, the fast budget and QUICK\_RUN set to false. Seed 42 is recorded for evaluation and used by the notebook's seeding routine. Table 2 lists the main settings. The RTX 4050 preset uses smaller dimensions, batches and fanout; it is a supported configuration rather than a second measured experiment in this report.
+The saved run identifies a Tesla T4 with approximately 15.6 GB of memory, the long budget and QUICK\_RUN set to false. Seed 42 is recorded for evaluation and used by the notebook's seeding routine. Table 2 lists the main settings. The checked-in notebook still defaults to the fast budget, so reproducing these results requires explicitly selecting long. The RTX 4050 preset is supported but is not a second measured experiment here.
 
 \begin{table}[t]\centering\small
 \setlength{\tabcolsep}{3pt}
@@ -162,12 +162,12 @@ Embedding coordinates & 128 \\
 GNN layers / R-GCN bases & 2 / 8 \\
 Batch size & 512 \\
 Fanout per hop & 10, 10 \\
-Maximum epochs $\times$ steps & 8 $\times$ 400 \\
+Maximum epochs $\times$ steps & 12 $\times$ 600 \\
 Negatives per direction & 16 \\
 Learning rate & 0.001 \\
 Weight decay & 0.00001 \\
 Dropout / gradient clip & 0.2 / 1.0 \\
-Local test triples & 8,000 \\
+Local test triples & 15,000 \\
 Local sampled negatives & 500 \\
 OGB test triples & 162,870 \\
 \bottomrule\end{tabular}
@@ -180,11 +180,11 @@ For a query with rank q, reciprocal rank is 1/q. Mean reciprocal rank, or MRR, a
 For example, suppose four queries have ranks 1, 2, 5 and 10. Their MR is 4.5 and their MRR is (1 + 0.5 + 0.2 + 0.1)/4 = 0.45. Hits@1 is 0.25, Hits@3 is 0.50 and Hits@10 is 1.00. This example is illustrative, not an additional experiment. It shows why a score of 0.45 is not the same as saying that 45 percent of predictions are correct at rank one.
 
 \subsection*{6.3 Local sampled-candidate evaluation}
-The local test takes the first 8,000 triples of the prepared test array. Each triple generates a head query and a tail query, giving 16,000 directional ranks. A query contains the true entity plus 500 sampled alternatives. The saved n\_candidates value describes the alternatives, so the initial score matrix has 501 entries per query. Sampling with replacement can repeat alternatives, meaning these are not necessarily 501 distinct entities.
+The local test takes the first 15,000 triples of the prepared test array. Each triple generates a head query and a tail query, giving 30,000 directional ranks. A query contains the true entity plus 500 sampled alternatives. The saved n\_candidates value describes the alternatives, so the initial score matrix has 501 entries per query. Sampling with replacement can repeat alternatives, meaning these are not necessarily 501 distinct entities.
 
 The candidate generator is the same type-aware corruption helper used in training. With the saved BioKG settings, the local test is therefore also type-aware; it is not an unconstrained sample from all entities. Other known true triples are masked through the lookup table. A tie with the positive score counts against the target because the ranking code uses greater-than-or-equal comparisons for negatives. This is a pessimistic tie rule.
 
-The candidate generator is reset to seed 42 for each evaluation, which aligns candidate sampling between models under the same batching. Graph neighbourhood sampling uses the global random generator separately, so contextualised queries can still vary between evaluation calls. The first 8,000 prepared rows are also not documented as a stratified test sample. Their results should be read as a local diagnostic, not a complete replacement for the benchmark test.
+The candidate generator is reset to seed 42 for each evaluation, which aligns candidate sampling between models under the same batching. Graph neighbourhood sampling uses the global random generator separately, so contextualised queries can still vary between evaluation calls. The first 15,000 prepared rows are also not documented as a stratified test sample. Their results should be read as a local diagnostic, not a complete replacement for the benchmark test.
 
 \subsection*{6.4 OGB evaluation}
 The second procedure scores all 162,870 original OGB test triples in both directions and passes the positive and supplied negative scores to the OGB evaluator. The notebook preserves the original test order so that each positive remains paired with its corresponding negative list. The saved metrics average the evaluator's per-query outputs across head and tail predictions.
@@ -193,100 +193,100 @@ OGB's BioKG protocol supplies 500 type-compatible negative entities for each cor
 
 \section*{7 Results and Discussion}
 \subsection*{7.1 Local ranking results}
-Table 3 reports the saved local MRR and Hits metrics, rounded to four decimal places. CompGCN-mult leads with MRR 0.5256 and Hits@10 0.8005. CompGCN-sub follows at 0.5000 MRR, then R-GCN at 0.4552. Among the shallow models, ComplEx obtains 0.3866, ahead of DistMult and TransE at approximately 0.314. Correlation is much weaker in this run, with MRR 0.0725.
+Table 3 reports the saved local MRR and Hits metrics, rounded to four decimal places. CompGCN-mult leads with MRR 0.6307 and Hits@10 0.8668. CompGCN-sub follows at 0.5763 MRR, then R-GCN at 0.5490. DistMult is now the strongest shallow model at 0.3484, followed by TransE at 0.2847 and ComplEx at 0.2748. Correlation performs very poorly, with MRR 0.0021 and zero Hits@1, Hits@3 and Hits@10.
 
 \begin{table}[t]\centering\small
 \setlength{\tabcolsep}{3pt}
 \begin{tabular}{lrrrr}
 \toprule
 Model & MRR & H@1 & H@3 & H@10 \\ \midrule
-DistMult & 0.3141 & 0.2136 & 0.3671 & 0.5228 \\
-R-GCN & 0.4552 & 0.3189 & 0.5349 & 0.7290 \\
-CompGCN-sub & 0.5000 & 0.3545 & 0.5816 & 0.7944 \\
-CompGCN-mult & 0.5256 & 0.3859 & 0.6084 & 0.8005 \\
-CompGCN-corr & 0.0725 & 0.0441 & 0.0750 & 0.1152 \\
-TransE & 0.3137 & 0.1786 & 0.3632 & 0.6165 \\
-ComplEx & 0.3866 & 0.2740 & 0.4493 & 0.6099 \\
+DistMult & 0.3484 & 0.2432 & 0.3912 & 0.5617 \\
+R-GCN & 0.5490 & 0.4205 & 0.6236 & 0.7978 \\
+CompGCN-sub & 0.5763 & 0.4468 & 0.6541 & 0.8280 \\
+CompGCN-mult & 0.6307 & 0.5043 & 0.7138 & 0.8668 \\
+CompGCN-corr & 0.0021 & 0.0000 & 0.0000 & 0.0000 \\
+TransE & 0.2847 & 0.1718 & 0.3263 & 0.5189 \\
+ComplEx & 0.2748 & 0.1865 & 0.3084 & 0.4479 \\
 \bottomrule\end{tabular}
-\caption{Local filtered sampled-candidate results on 8,000 triples, evaluated in both directions.}\end{table}
-CompGCN-mult improves on R-GCN by 0.0704 MRR in the local test, and on DistMult by 0.2115. These are absolute differences on the MRR scale. They describe the saved comparison and are not estimates of a guaranteed gain on other datasets or seeds. The smaller gap between the multiplication and subtraction variants is particularly worth checking with repeated runs before choosing between them solely on accuracy.
+\caption{Local filtered sampled-candidate results on 15,000 triples, evaluated in both directions.}\end{table}
+CompGCN-mult improves on R-GCN by 0.0817 MRR in the local test, and on DistMult by 0.2823. These are absolute differences on the MRR scale. They describe the saved comparison and are not guaranteed gains on other datasets or seeds. Multiplication also exceeds subtraction by 0.0543. Repeated runs would help determine whether these gaps are stable under changes in sampling and initialisation.
 
-MR tells a slightly different story. CompGCN-sub has the lowest mean rank, 14.59, compared with 15.80 for multiplication and 26.90 for R-GCN. Multiplication can therefore win on MRR while subtraction wins on MR: a model may produce more top-ranked answers yet still have some relatively poor cases. Reporting several metrics makes this trade-off visible rather than hiding it behind a single overall winner.
+MR agrees with the leading MRR result in this run. CompGCN-mult has the lowest mean rank, 9.48, compared with 11.65 for subtraction and 13.47 for R-GCN. The strongest model therefore combines more high-ranked answers with a better average rank. Correlation's MR is 485.13 among 501 initial scored entries, placing it near the bottom of the local candidate ranking. Reporting MR makes that failure more visible than MRR alone.
 
 \subsection*{7.2 OGB results}
-Table 4 gives the OGB evaluator results. CompGCN-mult again has the highest MRR, 0.5127, followed by CompGCN-sub at 0.4995 and R-GCN at 0.4013. The top three models retain their order across the two procedures. Their agreement supports the main observation that the implemented graph encoders outperform the shallow DistMult baseline within this schedule.
+Table 4 gives the OGB evaluator results. CompGCN-mult again has the highest MRR, 0.6201, followed by CompGCN-sub at 0.5780 and R-GCN at 0.5472. The full seven-model MRR ordering is identical across the two procedures. Their agreement supports the observation that the implemented graph encoders outperform shallow DistMult within this schedule, while preserving the distinction between the evaluation protocols.
 
 \begin{table}[t]\centering\small
 \setlength{\tabcolsep}{3pt}
 \begin{tabular}{lrrrr}
 \toprule
 Model & MRR & H@1 & H@3 & H@10 \\ \midrule
-DistMult & 0.1492 & 0.0964 & 0.1692 & 0.2507 \\
-R-GCN & 0.4013 & 0.2900 & 0.4507 & 0.6224 \\
-CompGCN-sub & 0.4995 & 0.3848 & 0.5558 & 0.7255 \\
-CompGCN-mult & 0.5127 & 0.3984 & 0.5719 & 0.7355 \\
-CompGCN-corr & 0.0483 & 0.0275 & 0.0459 & 0.0754 \\
-TransE & 0.2651 & 0.1600 & 0.2994 & 0.4861 \\
-ComplEx & 0.2603 & 0.1761 & 0.2879 & 0.4240 \\
+DistMult & 0.3252 & 0.2244 & 0.3636 & 0.5264 \\
+R-GCN & 0.5472 & 0.4344 & 0.6059 & 0.7679 \\
+CompGCN-sub & 0.5780 & 0.4639 & 0.6411 & 0.7994 \\
+CompGCN-mult & 0.6201 & 0.5054 & 0.6911 & 0.8353 \\
+CompGCN-corr & 0.0040 & 0.0000 & 0.0000 & 0.0000 \\
+TransE & 0.2701 & 0.1649 & 0.3046 & 0.4897 \\
+ComplEx & 0.2504 & 0.1684 & 0.2776 & 0.4100 \\
 \bottomrule\end{tabular}
 \caption{OGB evaluator results on all 162,870 original test triples, with head and tail queries.}\end{table}
-The full ordering is not identical. TransE has OGB MRR 0.2651, slightly above ComplEx at 0.2603, although ComplEx leads it in the local test. DistMult falls from 0.3141 locally to 0.1492 with OGB, while multiplication changes from 0.5256 to 0.5127. These differences show that the protocol and test population affect models differently. They should not be used to infer a single cause without controlling those differences experimentally.
+DistMult has OGB MRR 0.3252, followed by TransE at 0.2701 and ComplEx at 0.2504. DistMult changes from 0.3484 locally to 0.3252 with OGB, while multiplication changes from 0.6307 to 0.6201. Subtraction and R-GCN also have similar aggregate scores under the two procedures. These agreements do not make the protocols interchangeable: they use different test populations and negative lists, and correlation behaves differently under their tie rules.
 
 \begin{figure}[t]\centering
 \includegraphics[width=\columnwidth]{fig_ogb_bars.png}
 \caption{Saved OGB MRR and Hits@10 results. Multiplication has the strongest recorded performance, with subtraction close behind. These are single-run scores without confidence intervals.}\end{figure}
-The absolute OGB MRR advantage of multiplication over R-GCN is 0.1114; its advantage over subtraction is 0.0132. The latter is a much narrower margin. No standard deviations or confidence intervals are available, so the report does not call either difference statistically significant. The evidence supports identifying the strongest recorded configuration, rather than claiming a universal superiority of CompGCN multiplication.
+The absolute OGB MRR advantage of multiplication over R-GCN is 0.0729; its advantage over subtraction is 0.0421. No standard deviations or confidence intervals are available, so neither difference is described as statistically significant. The evidence identifies the strongest recorded configuration rather than establishing universal superiority. The longer run also changes the shallow-model ordering relative to the earlier export, making it important to refresh conclusions as well as tables.
 
 \subsection*{7.3 Head prediction and tail prediction}
-The saved local metrics separate the two directions. Multiplication reaches tail MRR 0.6565 and head MRR 0.3947. R-GCN shows a similar imbalance, at 0.5723 and 0.3382. DistMult has a smaller difference, 0.3325 versus 0.2956, but lower performance in both directions. Table 5 makes the asymmetry explicit.
+The saved local metrics separate the two directions. Multiplication reaches tail MRR 0.6724 and head MRR 0.5889. R-GCN has the same direction of imbalance, at 0.5901 and 0.5080. DistMult has a smaller difference, 0.3625 versus 0.3343, but lower performance in both directions. Table 5 makes the asymmetry explicit.
 
 \begin{table}[t]\centering\small
 \setlength{\tabcolsep}{3pt}
 \begin{tabular}{lrrr}
 \toprule
 Model & Tail & Head & Gap \\ \midrule
-DistMult & 0.3325 & 0.2956 & 0.0369 \\
-R-GCN & 0.5723 & 0.3382 & 0.2341 \\
-CompGCN-sub & 0.6142 & 0.3859 & 0.2284 \\
-CompGCN-mult & 0.6565 & 0.3947 & 0.2619 \\
-CompGCN-corr & 0.0768 & 0.0682 & 0.0086 \\
-TransE & 0.3671 & 0.2602 & 0.1070 \\
-ComplEx & 0.4501 & 0.3231 & 0.1270 \\
+DistMult & 0.3625 & 0.3343 & 0.0282 \\
+R-GCN & 0.5901 & 0.5080 & 0.0821 \\
+CompGCN-sub & 0.6143 & 0.5384 & 0.0760 \\
+CompGCN-mult & 0.6724 & 0.5889 & 0.0835 \\
+CompGCN-corr & 0.0021 & 0.0021 & 0.0001 \\
+TransE & 0.2981 & 0.2714 & 0.0267 \\
+ComplEx & 0.2854 & 0.2642 & 0.0212 \\
 \bottomrule\end{tabular}
 \caption{Directional MRR in the local test. Gap is tail MRR minus head MRR.}\end{table}
-For multiplication, the gap is 0.2619. This suggests that improvements should be checked separately for the two directions rather than only through their average. Possible influences include the relation distribution, candidate pools, query-side encoding and tail-only checkpoint selection. The current experiment does not isolate these factors. A useful follow-up would evaluate per-relation head and tail metrics and select checkpoints using a bidirectional validation score.
+For multiplication, the gap is 0.0835. Head prediction remains weaker, even though the long-run results are less imbalanced than the earlier export. The changed local test size prevents treating that difference as a controlled before-and-after comparison. Possible influences include relation distribution, candidate pools, query-side encoding and tail-only checkpoint selection. A useful follow-up would report per-relation directional metrics and select checkpoints using bidirectional validation.
 
 \subsection*{7.4 Training cost}
-The exported train\_hours values sum timed training epochs and exclude validation and final evaluation. Converting them to minutes gives approximately 0.66 for DistMult, 13.80 for R-GCN, 3.30 for subtraction, 3.36 for multiplication, 3.00 for correlation, 0.72 for TransE and 0.78 for ComplEx. The small times for shallow models explain why equal update counts do not mean equal resource use.
+The exported train\_hours values sum timed training epochs and exclude validation and final evaluation. Converting them to minutes gives approximately 1.56 for DistMult, 31.56 for R-GCN, 7.56 for subtraction, 7.62 for multiplication, 4.44 for correlation, 1.44 for TransE and 1.50 for ComplEx. These measurements illustrate why equal configured update counts do not imply equal resource use. Correlation's shorter duration is not evidence of a useful efficiency gain given its failed ranking results.
 
 Multiplication's recorded training time is about one quarter of R-GCN's, while its OGB MRR is higher. That makes it an attractive configuration within this implementation. This is not a benchmark of optimally tuned R-GCN against optimally tuned CompGCN: different kernels, parameterisations and sampling interactions can affect the timing. The result is a practical comparison of the supplied code paths.
 
-The JSON records a notebook wall time of 0.86 hours, or 51.6 minutes. Since the notebook supports resuming previously completed work, this field should not automatically be interpreted as a guaranteed clean-start runtime for reproducing every artifact. A future run should save whether it resumed, dependency versions, successful update counts and peak memory alongside the time measurements.
+The JSON records a notebook wall time of 1.755 hours, or 105.3 minutes. Since the notebook supports resuming previously completed work, this field should not automatically be interpreted as a guaranteed clean-start runtime for reproducing every artifact. A future run should save whether it resumed, dependency versions, successful update counts and peak memory alongside the time measurements.
 
 \section*{8 Ablations and Error Analysis}
 \subsection*{8.1 R-GCN parameter sweep}
-The R-GCN ablations use four epochs of 200 steps each. This is 800 configured updates, one quarter of the 3,200-update main schedule, even though both the number of epochs and steps per epoch are halved. Comparisons within Table 6 are meaningful as a shorter-budget sweep. They should not be treated as equal-budget alternatives to the main R-GCN result.
+The R-GCN ablations use six epochs of 300 steps each. This is 1,800 configured updates, one quarter of the 7,200-update main schedule, even though both the number of epochs and steps per epoch are halved. Comparisons within Table 6 are meaningful as a shorter-budget sweep. They should not be treated as equal-budget alternatives to the main R-GCN result.
 
 \begin{table}[t]\centering\small
 \setlength{\tabcolsep}{3pt}
 \begin{tabular}{lrrr}
 \toprule
 Setting & MRR & H@1 & H@10 \\ \midrule
-Short-budget base & 0.4190 & 0.2786 & 0.7104 \\
-One layer & 0.4319 & 0.2911 & 0.7178 \\
-Eight negatives & 0.4304 & 0.2922 & 0.7117 \\
-Four bases & 0.4368 & 0.3030 & 0.7138 \\
-Dimension 64 & 0.4100 & 0.2648 & 0.7083 \\
+Short-budget base & 0.4115 & 0.2913 & 0.6553 \\
+One layer & 0.4494 & 0.3231 & 0.7005 \\
+Eight negatives & 0.3317 & 0.2135 & 0.5820 \\
+Four bases & 0.3950 & 0.2704 & 0.6438 \\
+Dimension 64 & 0.4364 & 0.3160 & 0.6789 \\
 \bottomrule\end{tabular}
-\caption{R-GCN ablations with 800 configured updates each. The main schedule allows 3,200 updates.}\end{table}
-The four-basis setting has the highest MRR in the sweep, 0.4368, compared with 0.4190 for the short-budget base. Reducing depth to one layer gives 0.4319, and reducing negatives to eight gives 0.4304. Reducing dimension to 64 gives 0.4100. The observed changes are small enough that repeated seeds would be useful before treating one setting as reliably better.
+\caption{R-GCN ablations with 1,800 configured updates each. The main schedule allows 7,200 updates.}\end{table}
+The one-layer setting has the highest MRR in the sweep, 0.4494, compared with 0.4115 for the short-budget base. Reducing dimension to 64 gives 0.4364. Four bases yields 0.3950, and eight negatives gives the lowest score, 0.3317. The strongest ablation therefore changes from the earlier export. Repeated seeds are needed before treating the observed preference for one layer as a reliable general result.
 
-The sweep suggests that a larger model is not automatically better under limited training. Fewer bases or a shallower encoder may be easier to optimise within 800 updates, but the current data do not establish that explanation. The one-layer variant also has the highest Hits@10 in this sweep, 0.7178, while four bases gives the best MRR. The preferred setting depends partly on whether the application values the first few ranks or a broader top-ten list.
+The sweep suggests that additional depth is not automatically helpful under limited training. One layer leads both MRR and Hits@10, with Hits@10 of 0.7005. A 64-dimensional encoder also exceeds the base on both measures. However, reducing the number of negatives or bases lowers MRR in this run. These results favour selective simplification rather than reducing every resource setting together; the experiment does not establish the optimisation mechanism behind the differences.
 
 \subsection*{8.2 What the degree diagnostic measures}
 The repository contains degree-based values labelled MRR, but the code computes them differently from the main metric. It first averages the head and tail ranks for each triple, then takes the reciprocal. Its per-triple value is therefore 2/(q\_head + q\_tail). Standard bidirectional MRR instead averages 1/q\_head and 1/q\_tail. These expressions are generally unequal.
 
-For example, head and tail ranks of 1 and 9 produce standard bidirectional MRR of about 0.5556. Taking the reciprocal of the mean rank gives 0.2. The second statistic penalises an imbalance between directions more strongly. Consequently, the saved category value 0.3542 should not be compared directly with multiplication's main MRR of 0.5256, nor explained away as merely a different slice of the same metric.
+For example, head and tail ranks of 1 and 9 produce standard bidirectional MRR of about 0.5556. Taking the reciprocal of the mean rank gives 0.2. The second statistic penalises an imbalance between directions more strongly. Consequently, the saved category value 0.5041 should not be compared directly with multiplication's main MRR of 0.6307, nor explained away as merely a different slice of the same metric.
 
 Table 7 retains the saved degree values but labels them as a reciprocal-mean-rank diagnostic. The groups are quartiles of head occurrence degree among evaluated triples, not quartiles of all entities in the graph. Common entities can appear in many evaluated triples, so this grouping has a different interpretation from dividing the entity set into four equally sized groups.
 
@@ -295,16 +295,16 @@ Table 7 retains the saved degree values but labels them as a reciprocal-mean-ran
 \begin{tabular}{lr}
 \toprule
 Head occurrence degree & Diagnostic \\ \midrule
-1 to 121 & 0.1764 \\
-Above 121 to 1,583 & 0.2326 \\
-Above 1,583 to 8,071 & 0.4578 \\
-Above 8,071 to 62,733 & 0.5503 \\
+1 to 136 & 0.4012 \\
+Above 136 to 741 & 0.4993 \\
+Above 741 to 5,551 & 0.5679 \\
+Above 5,551 to 62,733 & 0.5486 \\
 \bottomrule\end{tabular}
 \caption{Saved reciprocal-mean-rank diagnostic by query-head degree. These values are not standard MRR.}\end{table}
-The diagnostic rises from 0.1764 in the lowest-degree group to 0.5503 in the highest. This is consistent with poorer ranking for less connected query heads under the diagnostic, but it does not prove that degree alone causes the difference. Relation composition and entity type may differ between groups. Standard per-group MRR requires the separate directional ranks; those ranks are not present in the exported aggregate JSON, so corrected values cannot be reconstructed from it.
+The diagnostic increases from 0.4012 in the lowest-degree group to 0.4993 and then 0.5679, before decreasing to 0.5486 in the highest-degree group. Less-connected heads remain the weakest group, but the relationship is not strictly increasing. Relation composition and entity type may differ between groups. Standard per-group MRR requires the separate directional ranks; those ranks are not present in the exported aggregate JSON, so corrected values cannot be reconstructed from it.
 
 \subsection*{8.3 Correlation and embedding visualisation}
-Correlation obtains the lowest MRR in both result tables. The saved training-curve figure can help identify when validation performance deteriorated, but aggregate metrics alone do not diagnose the cause. Learning rate, initialisation, relation-vector scale and gradient behaviour are reasonable variables to investigate. A controlled follow-up should change one factor at a time and retain loss, validation and gradient logs.
+Correlation obtains the lowest MRR in both tables and zero Hits@10. Its OGB MRR, 0.003984, is approximately 1/251, consistent with all 501 candidates tying under the evaluator's averaged tie rank (Open Graph Benchmark, evaluator source). This is a diagnostic clue, not proof of constant scores, because raw scores are absent. Its local MR of 485.13 is also consistent with extensive ties under pessimistic ranking after filtering. A rerun should inspect score variance, finite values and checkpoint selection before interpreting this as an ordinary weak model.
 
 The repository also includes a two-dimensional projection of base entity embeddings using UMAP or a t-SNE fallback. It is useful as a visual inspection of embedding structure, but the scatter plot has no entity-type colouring or quantitative cluster evaluation. Apparent groups therefore cannot establish that the model recovered biomedical types. That claim would require labels and a separate analysis.
 
@@ -317,22 +317,22 @@ The Spark experiment has two parts. The fraction sweep runs a count, an average-
 \begin{tabular}{lrr}
 \toprule
 Setting & Approx. rows & Seconds \\ \midrule
-10\% fraction & 476,267 & 1.94 \\
-25\% fraction & 1,190,669 & 1.65 \\
-50\% fraction & 2,381,338 & 2.06 \\
-100\% fraction & 4,762,676 & 0.73 \\
-2 partitions & 4,762,676 & 1.58 \\
-4 partitions & 4,762,676 & 1.31 \\
-8 partitions & 4,762,676 & 1.58 \\
-16 partitions & 4,762,676 & 1.37 \\
+10\% fraction & 476,267 & 1.77 \\
+25\% fraction & 1,190,669 & 2.22 \\
+50\% fraction & 2,381,338 & 2.05 \\
+100\% fraction & 4,762,676 & 0.69 \\
+2 partitions & 4,762,676 & 1.65 \\
+4 partitions & 4,762,676 & 1.28 \\
+8 partitions & 4,762,676 & 1.22 \\
+16 partitions & 4,762,676 & 1.28 \\
 \bottomrule\end{tabular}
 \caption{Single-run local Spark timings. Fraction and partition sweeps time different workloads.}\end{table}
 The approximate row counts for sampled fractions are calculated as the full count multiplied by the fraction. They are not saved realised sample counts. The 100-percent DataFrame has already been cached and used earlier, while smaller fractions add sampling work. Spark can also reuse or optimise existing plans. These conditions make the sweep unsuitable for inferring a clean linear relationship between input size and runtime.
 
 \subsection*{9.2 Reading the observed times}
-The full-data point takes 0.73 seconds, less than the 1.94 seconds for the 10-percent sample. This does not mean that processing more data is inherently faster. It reflects a timing experiment in which cache state and query work differ. Nor does it mean that complete ingestion, cleaning, indexing, Parquet writing and tensor preparation finish in under a second. Those stages are outside the timed operation group.
+The full-data point takes 0.69 seconds, less than the 1.77 seconds for the 10-percent sample. This does not mean that processing more data is inherently faster. It reflects a timing experiment in which cache state and query work differ. Nor does it mean that complete ingestion, cleaning, indexing, Parquet writing and tensor preparation finish in under a second. Those stages are outside the timed operation group.
 
-The partition experiment ranges from about 1.31 to 1.58 seconds, with four partitions the fastest observed setting. There is one measurement per setting and no estimate of normal run-to-run variation. The data do not establish a best partition count or demonstrate saturation of a specific CPU configuration. They show that these small local workloads have similar observed times under the tested partition choices.
+The partition experiment ranges from about 1.22 to 1.65 seconds, with eight partitions the fastest observed setting. There is one measurement per setting and no estimate of normal run-to-run variation. The data do not establish a best partition count or demonstrate saturation of a specific CPU configuration. They show that these small local workloads have similar observed times under the tested partition choices.
 
 \subsection*{9.3 A stronger follow-up experiment}
 A more informative study would measure the same operation at every setting, record actual row counts and separate cold-cache from warm-cache trials. Several repetitions should be run in a varied order and summarised with medians and spread. End-to-end ETL time, shuffle volume, peak host memory and task counts would help explain where resources are spent.
@@ -342,7 +342,7 @@ For cluster scalability, the number of workers would need to vary while the data
 \section*{10 Reproducibility and Project Organisation}
 The main executable artifact is notebooks/kg\_completion\_rgcn\_compgcn.ipynb. It contains configuration, loaders, Spark transformations, model classes, training, evaluation and export cells. The files under src separate several of these ideas into readable modules, but the notebook is self-contained. requirements.txt lists dependencies, while report/figures holds the exported charts and the report directory holds the written analysis.
 
-To reproduce the intended experiment, first use QUICK\_RUN for a small smoke test and verify that real data were loaded. The notebook has a synthetic fallback when data cannot be obtained; such a run is suitable for checking execution, not for reporting benchmark performance. Next choose BioKG, disable QUICK\_RUN and use the recorded T4 configuration. Inspect the saved flags rather than relying on hardware defaults from an older README.
+To reproduce the intended experiment, first use QUICK\_RUN for a small smoke test and verify that real data were loaded. Some loaders have a synthetic fallback for checking execution, while BioKG raises an error if loading fails. Next choose BioKG, disable QUICK\_RUN, set TIME\_BUDGET to long and use the recorded T4 configuration. The checked-in fast default does not reproduce the exported long-run schedule or evaluation size.
 
 For a fresh comparison, use a new output directory or disable resume after retaining previous artifacts. The current resume tag does not encode every training and evaluation option. Reusing an output directory after changing an omitted option can therefore mix incompatible saved results. Keeping a full configuration hash, notebook revision and dataset version with each run would make this safer.
 
@@ -351,7 +351,7 @@ After training, retain checkpoints, histories, results.json, both result CSV fil
 A full rerun is still necessary to verify the reported numerical results independently. The repository provides aggregate outputs, but not every per-query score and training event needed to reconstruct them without execution. The present analysis checks internal agreement of the saved tables and consistency with the notebook; it does not treat that check as a new training experiment.
 
 \section*{11 Conclusion}
-The project demonstrates a complete workflow for preparing a relational graph with Spark and training sampled graph encoders on one GPU. In the recorded BioKG run, CompGCN multiplication has the strongest ranking performance, with local MRR 0.5256 and OGB MRR 0.5127. Subtraction is close behind under OGB evaluation, while R-GCN improves substantially over the shallow DistMult baseline. Multiplication also has a lower recorded training-loop time than R-GCN in this implementation.
+The project demonstrates a complete workflow for preparing a relational graph with Spark and training sampled graph encoders on one GPU. In the recorded long BioKG run, CompGCN multiplication has the strongest ranking performance, with local MRR 0.6307 and OGB MRR 0.6201. Subtraction follows under both procedures, while R-GCN improves substantially over shallow DistMult. Multiplication also has a lower recorded training-loop time than R-GCN in this implementation.
 
 The results support using neighbourhood information within the tested update schedule. They do not establish a universal ordering of architectures, and they do not show that equal steps are equal computation. Head prediction remains weaker than tail prediction. The shorter R-GCN sweep suggests useful lower-cost settings, but repeated seeds are needed before turning those observations into firm recommendations.
 
@@ -377,6 +377,8 @@ William L. Hamilton, Rex Ying, and Jure Leskovec. 2017. Inductive representation
 Weihua Hu, Matthias Fey, Marinka Zitnik, Yuxiao Dong, Hongyu Ren, Bowen Liu, Michele Catasta, and Jure Leskovec. 2020. Open Graph Benchmark: Datasets for machine learning on graphs. Advances in Neural Information Processing Systems.
 
 Open Graph Benchmark. n.d. Link property prediction documentation, ogbl-biokg. https://ogb.stanford.edu/docs/linkprop/ Accessed 7 November 2026.
+
+Open Graph Benchmark. n.d. Evaluator source, linkproppred/evaluate.py. https://github.com/snap-stanford/ogb/blob/master/ogb/linkproppred/evaluate.py Accessed 7 November 2026.
 
 Michael Schlichtkrull, Thomas N. Kipf, Peter Bloem, Rianne van den Berg, Ivan Titov, and Max Welling. 2018. Modeling relational data with graph convolutional networks. The Semantic Web, ESWC. https://arxiv.org/abs/1703.06103
 

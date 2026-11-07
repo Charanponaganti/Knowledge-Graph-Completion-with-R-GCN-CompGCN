@@ -97,6 +97,9 @@ and `report/Knowledge_Graph_Completion_Report.pdf` (12 pages including reference
 using the supplied ACL Word format. See `report/REVIEW_NOTES.md` for the metric
 and methodology corrections. Its tables are generated from the saved root
 `results.json`; the experiments were not rerun for this editorial revision.
+The current report covers the saved **long** T4 run (12 × 600 steps; 15,000
+local test triples). Set `TIME_BUDGET = 'long'` explicitly to reproduce that
+configuration; the notebook currently defaults to `fast`.
 
 To regenerate the editable report and alternative LaTeX source:
 

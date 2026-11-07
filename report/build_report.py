@@ -22,8 +22,17 @@ NAMES = {'distmult': 'DistMult', 'rgcn': 'R-GCN', 'compgcn_sub': 'CompGCN-sub',
          'compgcn_mult': 'CompGCN-mult', 'compgcn_corr': 'CompGCN-corr',
          'decoder_transe': 'TransE', 'decoder_complex': 'ComplEx'}
 
+def degree_label(interval):
+    lower, upper = (float(x.strip()) for x in interval.strip('()[]').split(','))
+    return f'1 to {upper:,.0f}' if lower < 1 else f'Above {lower:,.0f} to {upper:,.0f}'
+
 def tables():
     m = DATA['main_results']
+    budget = DATA['budget']
+    evaluation = DATA['eval']
+    n_eval = evaluation['max_eval_triples']
+    updates = budget['gnn']['epochs'] * budget['gnn']['steps']
+    abl_updates = DATA['ablation'][0]['epochs'] * DATA['ablation'][0]['steps']
     result = {}
     result['dataset'] = ('Table 1: Prepared BioKG training graph. Counts are from the saved Spark statistics.',
         ['Statistic', 'Value'], [
@@ -36,11 +45,11 @@ def tables():
         ['Setting', 'Value'], [
         ['Embedding coordinates', '128'], ['GNN layers / R-GCN bases', '2 / 8'],
         ['Batch size', '512'], ['Fanout per hop', '10, 10'],
-        ['Maximum epochs × steps', '8 × 400'], ['Negatives per direction', '16'],
+        ['Maximum epochs × steps', f"{budget['gnn']['epochs']} × {budget['gnn']['steps']}"], ['Negatives per direction', '16'],
         ['Learning rate', '0.001'], ['Weight decay', '0.00001'],
-        ['Dropout / gradient clip', '0.2 / 1.0'], ['Local test triples', '8,000'],
+        ['Dropout / gradient clip', '0.2 / 1.0'], ['Local test triples', f'{n_eval:,}'],
         ['Local sampled negatives', '500'], ['OGB test triples', '162,870']])
-    result['local'] = ('Table 3: Local filtered sampled-candidate results on 8,000 triples, evaluated in both directions.',
+    result['local'] = (f'Table 3: Local filtered sampled-candidate results on {n_eval:,} triples, evaluated in both directions.',
         ['Model', 'MRR', 'H@1', 'H@3', 'H@10'],
         [[NAMES[k]] + [f'{v[x]:.4f}' for x in ['MRR', 'Hits@1', 'Hits@3', 'Hits@10']] for k,v in m.items()])
     result['ogb'] = ('Table 4: OGB evaluator results on all 162,870 original test triples, with head and tail queries.',
@@ -50,12 +59,12 @@ def tables():
         ['Model', 'Tail', 'Head', 'Gap'],
         [[NAMES[k], f'{v["MRR_tail"]:.4f}', f'{v["MRR_head"]:.4f}', f'{v["MRR_tail"]-v["MRR_head"]:.4f}'] for k,v in m.items()])
     tags = {'base':'Short-budget base', 'layers1':'One layer', 'neg8':'Eight negatives', 'bases4':'Four bases', 'dim64':'Dimension 64'}
-    result['ablation'] = ('Table 6: R-GCN ablations with 800 configured updates each. The main schedule allows 3,200 updates.',
+    result['ablation'] = (f'Table 6: R-GCN ablations with {abl_updates:,} configured updates each. The main schedule allows {updates:,} updates.',
         ['Setting', 'MRR', 'H@1', 'H@10'],
         [[tags[v['tag']]] + [f'{v[x]:.4f}' for x in ['MRR','Hits@1','Hits@10']] for v in DATA['ablation']])
     result['degree'] = ('Table 7: Saved reciprocal-mean-rank diagnostic by query-head degree. These values are not standard MRR.',
         ['Head occurrence degree', 'Diagnostic'],
-        [[label,f'{v:.4f}'] for label,v in zip(['1 to 121','Above 121 to 1,583','Above 1,583 to 8,071','Above 8,071 to 62,733'], DATA['error_analysis']['mrr_by_degree'].values())])
+        [[degree_label(interval), f'{v:.4f}'] for interval,v in DATA['error_analysis']['mrr_by_degree'].items()])
     result['spark'] = ('Table 8: Single-run local Spark timings. Fraction and partition sweeps time different workloads.',
         ['Setting', 'Approx. rows', 'Seconds'],
         [[f'{int(v["x"]*100)}% fraction' if v['axis']=='fraction' else f'{int(v["x"])} partitions',f'{v["approx_triples"]:,}',f'{v["seconds"]:.2f}'] for v in DATA['spark_scale']])
