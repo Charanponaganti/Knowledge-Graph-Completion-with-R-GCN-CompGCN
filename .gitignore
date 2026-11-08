@@ -3,7 +3,7 @@ spark-tmp/
 metastore_db/
 derby.log
 checkpoints/
-outputs/
+outputs/*.pt
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
@@ -19,4 +19,14 @@ report/latex/*.blg
 report/latex/*.out
 report/latex/missfont.log
 *.zip
-tmp/report/
+report/
+src/
+_*.py
+_nb_dump/
+*.json
+*.csv
+!outputs/*.json
+!outputs/*.csv
+*.docx
+notebooks/kg_completion_rgcn_compgcn.ipynb
+notebooks/notebook*.ipynb
