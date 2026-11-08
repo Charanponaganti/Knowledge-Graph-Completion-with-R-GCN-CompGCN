@@ -21,7 +21,6 @@ report/latex/missfont.log
 *.zip
 report/
 src/
-figures/
 _*.py
 _nb_dump/
 *.json
