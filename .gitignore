@@ -3,7 +3,7 @@ spark-tmp/
 metastore_db/
 derby.log
 checkpoints/
-outputs/
+outputs/*.pt
 __pycache__/
 *.pyc
 .ipynb_checkpoints/
@@ -25,6 +25,8 @@ _*.py
 _nb_dump/
 *.json
 *.csv
+!outputs/*.json
+!outputs/*.csv
 *.docx
 notebooks/kg_completion_rgcn_compgcn.ipynb
 notebooks/notebook*.ipynb
