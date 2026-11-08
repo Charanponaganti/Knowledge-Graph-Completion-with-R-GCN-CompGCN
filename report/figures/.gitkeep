@@ -1,2 +1,0 @@
-# Notebook saves PNGs here on a local run, and to /kaggle/working/figures on Kaggle.
-# Copy Kaggle figures into this folder before re-running report/build_report.py.

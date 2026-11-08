@@ -19,3 +19,13 @@ report/latex/*.blg
 report/latex/*.out
 report/latex/missfont.log
 *.zip
+report/
+src/
+figures/
+_*.py
+_nb_dump/
+*.json
+*.csv
+*.docx
+notebooks/kg_completion_rgcn_compgcn.ipynb
+notebooks/notebook*.ipynb
